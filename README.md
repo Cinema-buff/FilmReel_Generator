@@ -11,3 +11,2550 @@ Film Reel Generator add on for blender
 
 
 PS: This add on was vibe coded with Claud, also feel free to mess with it however you wish :)
+
+
+
+
+[FilmReel_Generator_v6.py](https://github.com/user-attachments/files/33512764/FilmReel_Generator_v6.py)
+# SPDX-License-Identifier: GPL-3.0-or-later
+bl_info = {
+    "name": "Film Reel",
+    "author": "Claude",
+    "version": (1, 8, 0),
+    "blender": (4, 2, 0),
+    "location": "3D Viewport > Sidebar (N) > Film Reel",
+    "description": "Build a 35mm film strip / reel from an image sequence or video, "
+                   "using the embedded Film35mm model (M_FilmHolder + M_FilmImage materials)",
+    "category": "Object",
+}
+
+import base64
+import bisect
+import math
+import os
+import re
+import struct
+import zlib
+
+import numpy as np
+import bpy
+from bpy.props import (BoolProperty, CollectionProperty, EnumProperty,
+                       FloatProperty, FloatVectorProperty, IntProperty,
+                       PointerProperty, StringProperty)
+from bpy.types import Operator, Panel, PropertyGroup
+
+# ----------------------------------------------------------------------------
+# Embedded Film35mm mesh (extracted from Film35mm.fbx; zlib + base64).
+# Layout: header (nverts, npolys, nloops) | verts f32*3 | poly sizes u16 |
+#         loop vertex indices u16 | material index u8 per poly | UV f32*2 per loop
+# Local space: X = film width, Y = frame pitch (4 perfs), Z = face normal.
+# Material index 0 = M_FilmHolder (base + perforations), 1 = M_FilmImage (frame).
+# ----------------------------------------------------------------------------
+_MESH_B64 = (
+    "eNrsuHdcFNnzLny6e1TMmOMqxtV1V9E1wDTdzRlzFsSsgDkLiGsOmDArxkVRwZzDGnEGkR6ziOIKkjG7rhHjGgj3mf1OOb7v"
+    "e997/7jhr59+eLqqpk6fPqdOV1U/ywyMuYiM3SvK2MZH8fyE11bOXBKM2ZAXrA+HrBuXt0rjfb1hd/1BvgX5pw2w96gkL30c"
+    "zxPLLOMsapcx+l08X/Nwk86c+1seQs7vvFVnYYMsB9ql8VcPYPevY7kDub/NnlPfMtjMTB18cE+3bfJ8yNXDcU+3rfLT286m"
+    "O71g7/BQLp7kbNq/Efa+92RfyB8rYK5RaXKOzky593BP9rRVYSszjeqIe7LU01MynE0T7sKeU0heCTm9PeyBopwS8YJ36Il7"
+    "Jo6Tq29+wav+jnvmjJAvQx5WDvd07id/2P+C59/H2Lg9ZpcDL/iYThgbddh8EfPe2D+Js9REud+TeL5wO2TP+UbXZGfTG8Gb"
+    "s0+X5V53nE1V3z7xZIlH5PFbX/BbuV7Yq5by4agXPOsvm72Q3OSveL73M+xxmnHq3/F86X3YGTsdh7EDd2z3ZM575PbP4vmV"
+    "NZBDVp1pHstMIVJjmQW6yPVTnE1O0z092eKtshnyKN1PZp5r5BZaGk/ccdfI2Kbonttf8CXD4RN1yThnxwte+WJJmUWtN1Z4"
+    "Hs//6gt7XHEzfxHP42acgv8Ec+dUZ1NiIWMc6xsqH4P88lNkHAubIW/e+YJ3rwp7XGej78t4/qY+5Kjd5l9exfPZRaPimMtV"
+    "8w9pzqaEmY/jWOJomadjz0O8dObqLvPdL3jJRbCHhLgv3fuCr1gIOxPNhtfx3HcF7FEvzF3fxPNTi2FPrG/ZjbGHRgchXg3k"
+    "sm/j+YcgyK6tLBUQu0nHluL8VJRdERfDScghoea38Ak/ZbN3tCxWRrXIbI+YHmwVY5MPL7OdVfeYT08iPa91hH1dqZhyTyM9"
+    "N62Avbzzvz6fiiDW6zxiDj6L9HxSFPLycv/ak1cippmeMS9fRnoeWQM5sdJ//B8jXl3axpjeRHre/huyZ/V/7Q3NiN0wr5iR"
+    "XyI9s3XIAxv8ax89FrG70CsmOi/S0yUYcvTP/9rrFcP+G/rHPGNRnuuqQH7v+q/d9Zqfhf3sH7OiUJSnc6naFlb9P2s5/Rv2"
+    "vPqImFLFojw7jIBcXvnXftcV+z9uTEzXklGePzaE7MP/tesnsLeZE2L2OUd5FjkE+Xrbf+0jN9v2f0bMzSpRnsvCIb/w+te+"
+    "eyH2ucScmCfVozzj50I29P7XHhiHvb0zN2aQS5TngljI4f3/tY95iffi6fyY2XWiPGc/h3zB91873lOd9V4QU79ulOfTnrb3"
+    "xS8m9nMkX9cd+x8VYTZ8ieQj1mL//feY90I+Whp7fs9qnvw1krffin32f2zumhvJx3zA3gYaLBvyI3npNNv70twyviCSd12K"
+    "PXRtZzGyKP6qPfbNtY/FX4jiIRfN7iwxwDJfjOLPWmF/UudbvKUo/qUM9sR/uaWhIYqnrsc+dFhvCS4cxd8vx9oXH7K4FYni"
+    "v07GeveetFRyiuLR0Vjj01hLNuRjj7Eut8uWokWjeI1uthx1xTLzXQDf3RVryQmyFHofwKeuxloSp1h6fQjgF0piLanzLG8/"
+    "BvDRm7CWUcsskZ8C+Mo3WEuHdZameQG81y2sZepBS0p+AF87D2txO2mZxAL5DDesJfqs5aIYyNmtKmbmdM1iKBTIfdtjLU+T"
+    "LdsLB/ITVbCWxdmWHk6BfMMWrMX/L8uDEoH8zzCsZW+BZUKpQF5muu3dkWJ+cQ7ku81YywKnmDNlAnnUX1jLzhIxpcsG8hI9"
+    "sJYFJWNmvqvJT3XGWirHW4q/r8mXrsJanG5gLTV5UnGs5WkS1lKTr9iAtSzOwlpq8qMvsZZRT7CWmnzTVawlPB9rqcnTp2Mt"
+    "B6WYScyFF2mItbwoEnNRdOGe865gLaViDIVc+K3eWIuhfMz2wi58Qi2spUvlmB5OLrzHLqwlrnrM0xIu/PA6rCWzQcyEUi78"
+    "1Sys5f3PWIsLXxeDtSxvGnOujAtf+TfWcrBFTPmyLvyLl62mtIwJfxSvU53Kgkx1almrNJ3qVCJkqlNLHsfrVKdOv4vXqU49"
+    "gEx1an+7NJ3qVDLk7+qU9bs6Zf2uTlm/q1PW7+qU9bs6Zf2uTlm/q1PW7+qUlerUnYgXOtWpaptf6FSnLkGmOvV+/wud6lTN"
+    "Ay/07+qUlepU3yfx+nd1yvpdnbJSnRq39YVOdepQ1Aud6lTjv+J1qlNT/o7Xv6tTVqpT7Z7F69/VKet3dcr6XZ2yUp1qrqXp"
+    "VKe8t7/QqU7N3vFCpzpV/nm8TnXK80W8/l2dsn5Xp6xUpyJ2vtCpTg16Ga9Tnfr5Vbz+XZ2yflenrFSnPHe/0KlOLdn7Qqc6"
+    "Jb2O16lOdXkTr39Xp6xUp8q8jde/q1NWqlNNEBeqU2/gQ3Xq45PIuO/qURzVo/3PIuOoBqHuxFHd8XwTGUe1ZtiXyDiqL6fy"
+    "IuOopqCOxFEdQe2Io9pRolhUHNUL1Ig4qhGoC3FUF1AL4qgWIP/HUf5Hzo+jnD+zTlQc5Xnk9jjK7Wc/R+qU26UvkTrl9j2Q"
+    "Kbf/9jVSp9zeJTdSp9y+Pj9Sp9w+riBSp9zuzqJ0yu1+QpROuX2eGKVTbveSonTK7Q0MUTrl9omFo3TK7a2KROmU2ys6RemU"
+    "27MgU253KhqlU26f8S5Ap9wuvQ/QKbf3/BCgU27P+RigU27f+ilAp9zeJC9Ap9yenB+gU26fyAJ1yu3nxUCdcrtUKFCn3B5V"
+    "OFCn3N7VKVCn3H6vRKBOuX1cqUCdcnsj50CdcvvpMoE65faSZQN1yu0z3tXUKbcXfV9Tp9ze80NNnXJ7zseaOuX2rZ9q6pTb"
+    "m+TV1Cm3J+fX1Cm3T0RCpdx+XnTRKbdLhVx0yu1RhV10yu1dnVx0yu1PSrjolNvHlXLRKbc3cnbRKbefLeOiU24vW9ZFp9w+"
+    "pFsKjxuykLOp/xhnud3lcWXx/E615aZuaXxy2dWchZWWZ7nd5j/b7FH3jaVWp3CXZ/A/+sX4418pvMT4UM5C8o1rO6by5s8h"
+    "+wjymJOpfMywRVi7JD9vkMaXpkJOLSQ/3J7Gx7RfjHfNSQ6qnc5Tj0KOLiY/3J3ON5RfwplHSXlfkwzeYyLk66XlNjEZfN1V"
+    "yKPKylqXTJ5UZSmerYJc524mbzME8sFK8uhJWfzPbZB9qsp+xbP5vTuQ31eXn23P5uZ8yMtrykd++8qrl8fzF14mDzskmMSh"
+    "eH7vcDnVLJmO2ux7d8jH8E00ojzWO2KT3KR4Lq/BYG+8XA7fnsvbpeI+3itkX/c83nIH5HEr5XE38vj2oZBnr5LLDM7nDapB"
+    "Dg2TL+bk88xreOYFq+Vyswr44mDIk9fIF0Rmiq0A2XetfKsNM734A2s3rpNHL8C8HSAXWy+3wHfWhDTs1bX1svULMzUfDnnm"
+    "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"
+    "9iS3pGVk+zQ+bDLkqaUtXe6k8gUC5ERny8dxkBdhPw1lLfVLpvLFTpCdylmsZ1J47ALEIrWcZabbXZ04z8HdUnTiQme63daJ"
+    "83R1S9OJC32+PVsnXtG/eLZOfOOYSVk68ZB172bqxE96dsnUibdsG5OhE5+5v0mGTjzno93pOvGfE2un68SLPtqephNf+qJB"
+    "mk486tiTqTrxq+s6purEuzb4K0UnPrb06hSdeNphhwQrcZ5//PZVJy70mJlZifNMNUtW4kI7LhesxCtOGSxYiW+c6ipYiYe0"
+    "fmFW4idb6MxKvOXoBbinnc+81YZZiee8IDIr8Z8VZhXoxItezsnXv/Glg/N14lEn3MjTiV/1d8/TiXfdtD1XJz62afFcnXja"
+    "sI2ilTjPz6tFa4idC124oLCV+M/yB0XrEjuvuMYsWrva+cYql0TrSzsPWe6maN1h5yfPJYvWZ3besl26aG1r5zPjMkXrBTvP"
+    "6ZElWs/Z+c/YDNF6xM6Ltk4VraXsfOnZP0VrczuPWiFetDax86t1dTynnXc9ckK0Rtn52C67ROtFO0+7Y3ayTpxnQGCyTlzo"
+    "4nUJOvGfG/sk68QrLnVL1olvHFkzWSce0rd4sk785PuvSTrxlhk5STrxmY/+TtKJ53z3JEkn/lN4mqQTL1rpZZJOfGnPj0k6"
+    "8ahPpGSd+NXaFZN14l0X/pKsEx/7d6dknXjaPlO+6sR5Ru0WrMSFHrBIVuI8Ey3MSlzo9hK5OvGKUTtydeIb03A2iIdUcGaI"
+    "n3Txz9eJtyx4la8TnzlseoFOPOcrxqzEf042MSvxovPmMivxpWfO4pzbedSDH5mV+NW4RoKVeNeKAwUr8bHGUMFKPG3TA4KV"
+    "OM/IaV914kL3xzArcZ43YyQrcaHTlgpW4hWL+AtW4huHNRGs33hIvHfET96MY1biLXvhvSM+s2hbZiWes63ErMR/bp9doBMv"
+    "evttvk586bqh+TrxqP1v5enEr+7zyNOJd3XdnasTHyuWztWJpzX6pujEedYy3tWJCx1rTNOJ86xlvK0TF7ouMkUnXnHE+xT9"
+    "G9/YK1UnHlKLS9WJn9zaLE0n3nLugTSd+Eynn9J14jnnHkrXif8c1CJDJ160hp6hE1/q1SNTJx415EGmTvzqj1OydOJdw0tm"
+    "68THxu3M1omnHeNxVyfO83T/FL2MnQsd43FbJ87TxSNNJy70n93ZupOdV9xdOlv3sfONBVOz9FN2HrLSo0yd2fnJrV6Z+kE7"
+    "b1nFmqGXt/OZBVhLTzvPeQFrPGXnPx83TNc/23nRd/vT9HF2vjSyaZpezs6jXo1N1Y/b+dXdPVP1F3be9f2bFN3Lzsdu2Zyi"
+    "b7bztO5rRCtxntXDRStxobNDC1uJ/9yHvES8YrWTopX4xt+Rx4iHDEV+I36y/m3RSrzlFuRD4jMNyJ/Ec45E/iT+8zrsxIv+"
+    "gnxLfOkM5GHiUSNviFbiVwMu4j523vXQGdFKfOzz/aKVeNqm05N1Lzvn+fOiZJ240NnhCTrxn818kvWHdl5xVEvkTzvfeKRG"
+    "sr7TzkM2KpGsO9v5yYH5Sbq/nbfMeZ+kL7PzmSdeJ+mBdp5z+askfaCd/xz/Jknvb+dFB39K0qfY+dK5yJkF6/7DoxaUTdaT"
+    "7fxqwx+T9Td23nWGJ/KnnY+95pes77PztNqMrzpxno/+EKzEhUaelazEeV5A7iIuNN45VydescveXJ34xl+1PJ14yJFJeTrx"
+    "k61G5uvEW1b/J18nPjNqfoFOPGe9wsxK/KdXB2YlXrToYmYlvvTjBeQiO4+6O59ZiV+d21ywfuNdhwtW4mOjwgQr8bT9uqfo"
+    "/e2cZxH1rk5cqLeaphPnWUS9rRMXGrwmRV9j5xU/PE3RR9v5xsudU/Whdh6y4HSq/srOT2Y1StNd7bxlk91p+jA7n1mmfrpe"
+    "2c5zJu1P17vY+c/Hv2bo2+y86KW4DH2ZnS8V8f5G2XnUWnivy9j51Y3TsvSVdt71jHO2nm/nY4fvzdbf23nayYjdEjvnuWjW"
+    "V5240K2xzEqc5/lYyUpcaF/szwQ7rzgX+1bYzjfOwX7esfOQl7DPXe38ZMuLzLrazluORFzu2vnM64jXBTvPGYM4muz8p7iw"
+    "QCde9MinfH2EnS/9OCpfr2bnUbvdydO72flVD56nE+8avD9XJz7WqVyuTjxt+a2itZCd8zy7XrQ+t3OhgYsLW4n/XHJUtKbZ"
+    "ecXPsaLV1c43Bl0TrbftPORA5JNOdn7yS5po3W7nLYOz4WPnM+/dQz9m5zm73xetxH9euCtaiRdVkGeILz14R7QSj/oZuSXc"
+    "zq8WXEBPaOddQ6JF6147H1txn2gdaOdpe3je1Ynz/KtXir7fzoX28LytE+dZxDNNJy40Zn+2vsfOKzYul62Ps/ONLWdm6Tft"
+    "POTLJ5nodf/DTxbyydRP2XnLQhcy9Cg7nzm8VYZ+1s5zRhxO16fa+c86qIn97bxoGOrCBTtfusY1TT9m51GLnU3Vw+386i9e"
+    "qXorO+9qfoX3xc7HbgpP0WPsPG1CaLJOnGfZKck6caHDNifoxH+eQl4iXjEc+Yr4xqHIY8RDtiuXrBM/eQl5j3jLDciHxGeG"
+    "Ik8SzzkD+ZP4zwDkVeJFxyDfEl+6JC9JJx6Vob8lfrXGD8iTdt51aPNknfjYfV7JOvG0v8z5qhPn+XafYC1v50I3nJOsxHla"
+    "zjErcaGTyufqx+284ugD6D/tfOPvOP/d7Dzkq+Q8PcPOT1qRP4/aecuwj/l6Qzuf+XBugT7cznPuMDDrMTv/WasdsybYedHa"
+    "CzGvnS/tim+rYXYe9Vf0fgfs/KqMnnCmnXdd4CdYx9j52E1LBCvxtBVjBStxnr/N/aoTF7oefSNxnuY4yUpc6JcIwUq8YuNA"
+    "wUp8o6cqWImH3FFEsBI/6Z7ArMRbRqxiVuIzjd2ZlXjOgBJYo53/dFpVoBMvOkEo0IkvXRKYrxOPeiszTyd+9c92eTrxrvxI"
+    "rk58LK+UqxNP235kik6c5wd+VycuVDOl6cR5fuDo0+xc6MK9KTrxisa8FJ34xh6+qTrxkNlXUnXiJ+vJaTrxljnH03TiM/2b"
+    "pevEc144ma4T/7lMydCJF3W/ihph50sH9M3UiUed8Qw1ws6vlp+TpRPvOr1Ctk587MaD2TrxtGqbuzpxnj5tUnTiQtU2t3Xi"
+    "PN+3TtOJC/U7nK0TryhXzNaJb5w+O0snHpI/zdSJn2yPPEO8ZeXzGTrxmY3RfxLPKRxI14n/LFMvXSde9PWONJ340q4N0nTi"
+    "UUsfT9WJXx3ZNlUn3rXS/RSd+FinJSk68bRd9ohW4jyLrBCtxIUOXVrYSvxnDvIw8YoT8M1OfOP9RNFKPKQFfSbxkwrqAvGW"
+    "a1ALiM9MeiBaiecsD5n4zz6oEcSLbkL/SXzpbdQd4lH/Rj0iftVyTrQS71rimGglPnbaNtFKPG3zqGSdOM9u45J14kI7RSXo"
+    "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"
+    "PVzb2J/jdxezbGBM6/TwjFx0Xxnt8c3bbs/2ltGWVX/oZrN/LShQJ34N1kpVqaIVzwvWdleuor39ac6/9v4N/3N9WnOEthK/"
+    "z6s14psfjbNdy17ro1WtWkXbE9/nmx+Ns10nHXXVllWropU85vrNj8bZrvXDamulqlfRYlbX/uZH42zXjKTy2kr8Hnyn/Dc/"
+    "Gme77n6H9f1QReMf2Dc/Gme7jh+aoebh98gRGSr50Tjbddgf59QZNapo4SfOffOjcbbr+5ztatGaVbSf3m//5kfjbNdP1Ruq"
+    "k1yqaD3qNPzmR+Ns1zY7nirv8fujI08V8qNxtqtnw6HKjFpVNKfWQ7/50TjbldXykv/B7yFmb5n8aNzE5VtUEXGctWyLeuBI"
+    "GW1hWoQajuuM9Ih/7W9+OiMXO9hOo3NM57aJeZfb8wPttK4ThmmpwiStAQvR1kuTtHsFc7RpTedoD8YP0842maNZ8Xu3+iO0"
+    "Efi9RIMR3/xoXL+AYVpgYh/tAOyuf/b55kfjzgXC75SrNlwI0TZGu37zo3Ftg4ZpSzbU1nbi9w7htb/50bh4/K5llNcewF6Q"
+    "Wf6bH41bNHGYVuwL00xiiJbwlX3zo3HuwcM018AMNQK/RwdnqORH487h9+ax59Qs2E/o57750bi2k4Zpp/K2q7WkEE0Vdnzz"
+    "o3EnfhumrWzZUE3H76FKw29+NK7p5GFahztPlUqGEM3z0VOF/Gjcafwevmqo0h+/5xwY+s2PxjWfMkxjoX3kjbCzjv1k8qNx"
+    "mxZvUfcea/ctD1He2XknQl0Pe99RZ2Rf1uLbOaC46xVPunnC/syrs6YxRzwp7jNgd2k8R/P17qwdr+uIJ/nRuHf4Pe2GI57k"
+    "R+MG+nTW1JOOeJIfjcvG7+/XOeJJfjTOr1dnbU+aI57kR+NcenfWgj454kl+NC4BvwvjHfEkPxrXo09n7YvZEU/yo3Fp+H3p"
+    "l+3f4kl+NK5rv85aeVdHPMmPxl3E74uvOuJJfjTOpz/2ebIjnuRH427hd/a6l0zngPxo3OolW9S8wi00OgcU900pEeoz2M/t"
+    "OiOf8Knz7RxQ3L2DL7ith316i2bazvzgb/GkuDvDvvxn5H9cq9ZxxJP8aNzsls00U4IjnuRH4160aqZtP+6IJ/nRuGC3Zlrf"
+    "tY54kh+Ne4ffS6U64kl+NO6gezPtzkdHPMmPxo00NtMSRzviSX407pHt99OOeJIfjRsjN9N8/nHEk/xoXJpHM+1KQ0c8yY/G"
+    "9VLwe4wjnt/87OMe4/epAx3xJD8aN0RtpoX08JHpHJAfjQtdukXtNaCO9u0c2OMelhqhmmCnuk/ngOJOfQDVc4onxZ36gG/1"
+    "3B5P8qNxVM8pnuRH46ieUzzJj8ZRPad4kh+No3pO8SQ/Gkf1nOJJfjSO6jnFk/xoHNVziif50Tiq5xRP8qNxVM8pnuRH46ie"
+    "UzzJj8ZRPad4kh+No7pP54D8aBzVfToHFHfqA6hvpD6U+k7qI6lvpD6U+k7qI0X0DfLJSuqpT+vcTuL6x+tVboN+Yup+9KUP"
+    "GzJ1CerO4U2V1DWoO19w9cR1R2mmtrDVI1w9Ma/JY5iSvTPEraY6TLl1YJSbPLG+uwH98OnFdd1VzPvx1lClHeZrcnuoMhv9"
+    "7/u08W6/oR9eETfK7YB9Hpr39ZLFbv2uW5TyWNeYeIvSkuaxz3sF93m6waLE4r5euFL/S/3udf22m/vhTLUe3ouvhzLV7/tY"
+    "W7+780aCajv3KQkJKvW51Mfa/Mh++3qCGmLvc6mPtfmRPTY+Qd1h73Opj7X5kf3ZlQSV+lzqY21+ZM++nKBSn0t9rM2P7BmX"
+    "ElTqc6mPtfmRffzFBJX6XOpjbX5kzz+foFKfS32sze+b3ZqgUp9Lfey/fnb7az1BpT6X+libH9mLnktQqc+lPtbmR/bKsQkq"
+    "9bm2Ppb8yP4lJkH9ZBr6rf8lP7IzXG3vBfW/1O/azn16VKZqey+O4+rS6Iyc1324OuLWLrepPYZ/O8d0rkeuyFRs/UxkWKZi"
+    "63s+NDjRYhb637/rHzhl63O9l2QqndDPkB/Zd+T0Om3rc6sszFQmoZ8hP7IfXHT4tK3PPT0tU0lCP0N+ZI/5+dfodehzf/st"
+    "U7H1M+RH9sJtekbb+tyJQZmKrZ8hP7IP2REcnYc+d8/YTKUo+hnyI3uxnqujb6DP/TA8U2mGfob8yF5+9p5oM/rce4MzFVs/"
+    "Q35kv/HwdPRh9LlHB2Uqtn6G/Mh+8PmVaFuf6+GdqYShnyE/spfd/zF6MfrcQd0ylWHoZ8iP7Ppj8UwH9LmsU6Zi62fIj+zX"
+    "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"
+    "2EmPcmmtztnosJMu322tjtnqsJMeENlGXbzNYSd9nH9b9fF2h530gFrt1Pnf2Uk/eb+dOijKYSd9fFR7dcxmh530LQM7qGs2"
+    "OOykF6/QUT260mEn/ePljurKBQ476bMndlKvT3HYSY8p2VmdPdJhH4647HPx08yIUy3VT5vZ1139ZZiflos4Hljlp40a4qZ6"
+    "nfPTHiHOA1DfwkNaqRrq26lKrdQI1LdZJ1qqLhH+mqlPS3VFir8WxFqqhyoM1rYebaF26jVYWzGqheq6YbDm0xDnKXWwtvJ9"
+    "czWp6hDt7+vN1SuDhmgF0c3V9MghWmO9sdr4s5+2+kxzVfcepHUq1Vl16Yq8GNxJ3eThq7Uf3FZ9kNT/m/76Skf1YBOHnXSt"
+    "Ykd1WL3v/O16Sd8O6rAfHHbSK29vrwZVcthJ3/qwnTqmnMNO+vo67dSWZRx20m8Maatec3bYSS+9vY1au6zDTnrFB61VXsFh"
+    "J/10ndZqs6oOO+nPR5rU4rUcdtJfHeHqq4YOO+kheZ6qcwuHnfR5PT3VmyaHnfT70Zpazsdh3/u5hxq/aqL2NcRLdUPfliV5"
+    "q07o477M9Vb90NfV/+qtLkCfZwzoqWr4TnTO7qlWXBGkTW7vo47rFaQ1OuCjrqoWpGU69VLP3Q3Uqvr3Upshv/Y42kutjvwS"
+    "86mXehT5prVbb7UB8k/X8b3VROSj2ut7qy4DA7Qf9/VWG/+3Js47LKrr6eMLC6jYEYKKBXtBjZG6vnfmCki1IWVB2lJUlEQQ"
+    "BP2hQZSFUJWyimLFrqixYEEwGjvYBSVq1BC7EkBEBETwPXmenT356z6f7z33njlnd8/cMzN3+0eKTQX++OfvUaJqvxydw2LE"
+    "p68ScaJJpHixPhEDAiLF5VIlKgsixd8GKvF/LyJFS1Bi6YjFomGwEtvnLxbvpirx297FYucTSsx8tVhc8lyJUUOjxMd9kjAm"
+    "IErs45yE8rwo8dvKJLx2kz0nFydhqCRazP6UhLsmRos9zZPxgn+0+M+SZFyijBY7TiVj3o5oUcXscFkQI86pTMAt7Ll3VaEc"
+    "1xWEiDl5ctwYyJ7fIuRYZRIi1sjkOO9RsJj8xQt/38CeW4+zefAOFseHeGGzcbBo3NUL7R8HiTmHPdFpW5Co5+qJwtwg8Va1"
+    "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"
+)
+
+MESH_WIDTH = 72.42881774902344    # model units across the film width (35 mm)
+MESH_PITCH = 39.58382606506348    # model units per frame (4-perf pitch)
+MESH_IMG_ASPECT = 50.988 / 38.439  # aspect of the picture area (≈ 1.3265)
+HOLDER_SLOT = 0
+IMAGE_SLOT = 1
+
+COLLECTION_NAME = "Film Reel"
+ROOT_NAME = "Film Reel"
+MARK = "film_reel_addon"
+SERIAL = "film_reel_serial"
+RECOMMENDED_MAX = 240
+
+FPS_ITEMS = [
+    ('8', "8", ""), ('12', "12", ""), ('16', "16", ""),
+    ('18', "18", ""), ('23.976', "23.976", ""), ('24', "24", ""),
+    ('25', "25", ""), ('29.97', "29.97", ""), ('30', "30", ""),
+    ('48', "48", ""), ('50', "50", ""), ('59.94', "59.94", ""),
+    ('60', "60", ""), ('CUSTOM', "Custom", ""),
+]
+
+# (id, label, film width in mm). Every size uses the Film35mm model scaled
+# uniformly so its width equals the film width.
+FILM_SIZES = [
+    ('8MM', "8mm", 8.0), ('SUPER8', "Super 8", 8.0), ('16MM', "16mm", 16.0),
+    ('SUPER16', "Super 16", 16.0), ('24MM', "24mm", 24.0), ('35MM', "35mm", 35.0),
+    ('46MM', "46mm", 46.0), ('60MM', "60mm", 60.0), ('65MM', "65mm", 65.0),
+    ('70MM', "70mm", 70.0), ('IMAX70', "IMAX 70", 70.0),
+]
+FILM_SIZE_ITEMS = [(i, l, "") for i, l, _ in FILM_SIZES]
+FILM_WIDTH = {i: w for i, _, w in FILM_SIZES}
+FILM_LABEL = {i: l for i, l, _ in FILM_SIZES}
+
+# Picture shapes (width / height) the image can be shown in on each film frame.
+# The picture is centred in the frame's picture window; whatever the window has
+# left over is black (letterbox / pillarbox), exactly like a real exposure.
+ASPECT_PRESETS = [
+    ('1_1', "1:1 Square", 1.0),
+    ('4_3', "4:3 (1.33)", 4.0 / 3.0),
+    ('ACADEMY', "Academy (1.37)", 1.37),
+    ('3_2', "3:2 (1.50)", 1.5),
+    ('1_66', "Euro (1.66)", 5.0 / 3.0),
+    ('16_9', "16:9 (1.78)", 16.0 / 9.0),
+    ('1_85', "Flat (1.85)", 1.85),
+    ('2_00', "2:1 (2.00)", 2.0),
+    ('2_35', "Scope (2.35)", 2.35),
+    ('2_39', "Scope (2.39)", 2.39),
+    ('2_76', "Ultra (2.76)", 2.76),
+    ('3_4', "3:4 Portrait", 0.75),
+    ('9_16', "9:16 Vertical", 9.0 / 16.0),
+]
+ASPECT_VALUE = {i: v for i, _, v in ASPECT_PRESETS}
+ASPECT_ITEMS = (
+    [('RECOMMENDED', "Recommended",
+      "Match the loaded footage, so the picture is never stretched or cropped"),
+     ('WINDOW', "Full Frame (1.33)",
+      "Fill the whole picture window of the film frame (the original behaviour)")]
+    + [(i, l, "") for i, l, _ in ASPECT_PRESETS]
+    + [('CUSTOM', "Custom", "Enter any width / height ratio")])
+
+# Longest-side texture sizes offered for image sequences (0 = original size).
+RESOLUTION_STEPS = (4096, 2048, 1920, 1280, 1024, 512, 256)
+RESOLUTION_LABELS = {4096: "4096 px (4K)", 2048: "2048 px (2K)", 1920: "1920 px (Full HD)",
+                     1280: "1280 px (HD)", 1024: "1024 px", 512: "512 px", 256: "256 px"}
+RESOLUTION_ITEMS = (
+    [('RECOMMENDED', "Recommended",
+      "The source's own size, stepped down only as far as needed to keep the frame "
+      "textures within about 1 GB of memory (never upscaled)"),
+     ('0', "Original", "Keep the original resolution")]
+    + [(str(s), RESOLUTION_LABELS[s], "") for s in RESOLUTION_STEPS])
+MEMORY_BUDGET_GB = 1.0   # what "Recommended" resolution aims to stay under
+
+
+# ----------------------------------------------------------------------------
+# Pure helpers
+# ----------------------------------------------------------------------------
+def decode_mesh():
+    raw = zlib.decompress(base64.b64decode("".join(_MESH_B64.split())))
+    nv, npoly, nl = struct.unpack_from('<III', raw, 0)
+    o = 12
+    verts = struct.unpack_from('<%df' % (nv * 3), raw, o); o += nv * 12
+    sizes = struct.unpack_from('<%dH' % npoly, raw, o); o += npoly * 2
+    idx = struct.unpack_from('<%dH' % nl, raw, o); o += nl * 2
+    mats = struct.unpack_from('<%dB' % npoly, raw, o); o += npoly
+    uvs = struct.unpack_from('<%df' % (nl * 2), raw, o)
+    vlist = [verts[i:i + 3] for i in range(0, len(verts), 3)]
+    faces, p = [], 0
+    for s in sizes:
+        faces.append(tuple(idx[p:p + s]))
+        p += s
+    return vlist, faces, list(mats), list(uvs)
+
+
+def natural_key(s):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)]
+
+
+def expand_sequence(directory, names):
+    """One selected file like frame_0001.png -> all siblings frame_NNNN.png."""
+    if len(names) == 1:
+        m = re.match(r'^(.*?)(\d+)(\.[^.]+)$', names[0])
+        if m:
+            pre, _num, ext = m.groups()
+            pat = re.compile('^' + re.escape(pre) + r'\d+' + re.escape(ext) + '$', re.I)
+            try:
+                found = [f for f in os.listdir(directory) if pat.match(f)]
+            except OSError:
+                found = []
+            if len(found) > 1:
+                names = found
+    return sorted(names, key=natural_key)
+
+
+def movie_extensions():
+    try:
+        return set(bpy.path.extensions_movie)
+    except Exception:
+        return {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.mpg',
+                '.mpeg', '.wmv', '.mxf', '.flv', '.ogv'}
+
+
+def spiral_table(r0, b, s_max):
+    """Arc length -> angle table for the Archimedean spiral r = r0 + b*theta."""
+    dth = 0.002
+    n = 20000
+    while True:
+        th = np.arange(n + 1, dtype=np.float64) * dth
+        r_mid = r0 + b * (th[:-1] + dth * 0.5)
+        ds = np.sqrt(r_mid * r_mid + b * b) * dth
+        arc = np.concatenate(([0.0], np.cumsum(ds)))
+        if arc[-1] >= s_max:
+            return arc, th
+        n *= 2
+
+
+def _strip_coords(verts, scale, n):
+    """Shared set-up for every strip layout: per-vertex arc length along the strip,
+    film-width coordinate x and film-thickness coordinate z, for n frames."""
+    V = np.asarray(verts, dtype=np.float64) * scale
+    nv = len(V)
+    y_min, y_max = V[:, 1].min(), V[:, 1].max()
+    pitch = float(y_max - y_min)
+    y_local = V[:, 1] - 0.5 * (y_max + y_min)
+    z_local = V[:, 2].copy()
+    # The model's end edges bow by a hair (~0.007 model units) and don't quite
+    # mirror each other. Snap the end-edge vertices onto exact, flat edge lines
+    # so one frame's tip edge coincides exactly with the next frame's bottom edge.
+    half = 0.5 * pitch
+    end_top = y_local > 0.985 * half
+    end_bot = y_local < -0.985 * half
+    y_local[end_top], y_local[end_bot] = half, -half
+    z_local[end_top | end_bot] = 0.0
+    c = (np.arange(n, dtype=np.float64) + 0.5) * pitch          # frame centres (arc length)
+    s_arc = (c[:, None] - y_local[None, :]).ravel()               # local +Y runs against the strip
+    x = np.tile(V[:, 0], n)
+    z = np.tile(z_local, n)
+    return nv, pitch, s_arc, x, z
+
+
+def strip_geometry(verts, faces, mats, uvs, scale, n, mode, r0=0.0, wind=0.0):
+    """Combine n copies of the frame mesh into ONE continuous strip.
+
+    Frame k covers arc length k*pitch .. (k+1)*pitch, where pitch is the exact
+    Y extent of the frame mesh, so the tip edge of one frame is the bottom edge
+    of the next (identical vertex positions). In SPIRAL mode every vertex is
+    bent onto the spiral, so the strip stays seamless instead of leaving
+    wedge-shaped gaps between flat frames.
+
+    Returns (positions Nx3, faces, loop normals Lx3, material index per poly
+    (0 = holder, k+1 = image of frame k), uv floats).
+    """
+    nv, pitch, s_arc, x, z = _strip_coords(verts, scale, n)
+
+    if mode == 'SPIRAL':
+        b = wind / (2.0 * math.pi)
+        arc, th_tab = spiral_table(r0, b, float(s_arc.max()) + pitch)
+        th = np.interp(s_arc, arc, th_tab)
+        r = r0 + b * th
+        ty = b * np.cos(th) - r * np.sin(th)
+        tz = b * np.sin(th) + r * np.cos(th)
+        ln = np.hypot(ty, tz)
+        ty, tz = ty / ln, tz / ln
+        ny, nz = tz, -ty                                          # outward normal
+        py = r * np.cos(th) + z * ny
+        pz = r * np.sin(th) + z * nz
+        vnorm = np.stack([np.zeros_like(ny), ny, nz], axis=1)
+    else:
+        py = -s_arc
+        pz = z
+        vnorm = np.tile(np.array([0.0, 0.0, 1.0]), (n * nv, 1))
+
+    pos = np.stack([x, py, pz], axis=1)
+
+    base_faces = [tuple(f) for f in faces]
+    all_faces = []
+    for k in range(n):
+        off = k * nv
+        all_faces.extend(tuple(i + off for i in f) for f in base_faces)
+    loop_v = np.fromiter((i for f in all_faces for i in f), dtype=np.int64)
+    lnorm = vnorm[loop_v]
+
+    mats = np.asarray(mats, dtype=np.int64)
+    mat_idx = np.concatenate([np.where(mats == IMAGE_SLOT, k + 1, 0) for k in range(n)])
+    uv_all = np.tile(np.asarray(uvs, dtype=np.float32), n)
+    return pos, all_faces, lnorm, mat_idx, uv_all
+
+
+_SPIRAL_CACHE = {}
+
+
+def _spiral_cached(r0, b, s_max):
+    key = (round(float(r0), 12), round(float(b), 12))
+    ent = _SPIRAL_CACHE.get(key)
+    if ent is None or ent[0][-1] < s_max:
+        if len(_SPIRAL_CACHE) > 16:
+            _SPIRAL_CACHE.clear()
+        ent = spiral_table(r0, b, s_max)
+        _SPIRAL_CACHE[key] = ent
+    return ent
+
+
+def unwind_geometry(verts, scale, n, r0, wind, r0t, reverse, path, c_t, progress):
+    """Positions of every strip vertex while the film unwinds along a path.
+
+    Everything happens in the reel's own plane (local Y/Z; the reel axis is local X):
+      * supply reel   centred on the origin, core radius r0, the original wound spiral
+        (frame 1 at the core). Film pays out from its OUTER end (the last frame).
+      * take-up reel  centred on c_t, core radius r0t. The leading end (last frame) is
+        fixed to its core and the film winds on over it.
+      * path          polyline (m x 2) the free film follows, first point = start.
+        Between the reels' current outer radius and the path ends the film runs
+        along straight tangent lines, so it always leaves / meets a reel tangentially.
+    progress 0 = everything on the supply reel, 1 = everything on the take-up reel
+    (linear in film length fed through). reverse = the take-up winds the other way round.
+
+    Returns (positions Nx3, per-vertex normals Nx3, warning string,
+    total film length fed from progress 0 to 1).
+    """
+    nv, pitch, s, x, z = _strip_coords(verts, scale, n)
+    L = n * pitch
+    b = wind / (2.0 * math.pi)
+    eps_t = -1.0 if reverse else 1.0
+    arc_s, th_s = _spiral_cached(r0, b, L + pitch)
+    arc_t, th_t = _spiral_cached(r0t, b, L + pitch)
+    path = np.asarray(path, dtype=np.float64).reshape(-1, 2)
+    c_t = np.asarray(c_t, dtype=np.float64)
+    A, B = path[0], path[-1]
+
+    def rad_s(o):
+        return r0 + b * float(np.interp(o, arc_s, th_s)) if o > 0.0 else r0
+
+    def rad_t(sg):
+        return r0t + b * float(np.interp(sg, arc_t, th_t)) if sg > 0.0 else r0t
+
+    def free_curve(rs, rt):
+        D = A
+        d = max(float(np.hypot(D[0], D[1])), rs)
+        phi_s = math.atan2(D[1], D[0]) - math.acos(min(1.0, rs / d))
+        Qs = rs * np.array([math.cos(phi_s), math.sin(phi_s)])
+        D2 = B - c_t
+        d2 = max(float(np.hypot(D2[0], D2[1])), rt)
+        phi_t = math.atan2(D2[1], D2[0]) + eps_t * math.acos(min(1.0, rt / d2))
+        Qt = c_t + rt * np.array([math.cos(phi_t), math.sin(phi_t)])
+        pts = np.vstack([Qs, path, Qt])
+        seg = np.hypot(*np.diff(pts, axis=0).T)
+        pts = pts[np.concatenate(([True], seg > 1e-9))]
+        if len(pts) < 2:
+            pts = np.vstack([pts[0], pts[0] + np.array([1e-6, 0.0])])
+        seg = np.hypot(*np.diff(pts, axis=0).T)
+        cum = np.concatenate(([0.0], np.cumsum(seg)))
+        dirs = np.diff(pts, axis=0) / seg[:, None]
+        return pts, cum, dirs, phi_s, phi_t
+
+    warn = ""
+    if float(np.hypot(A[0], A[1])) < 0.98 * rad_s(L):
+        warn = "Path start is inside the full reel - move it outward"
+    elif float(np.hypot(*(B - c_t))) < 0.98 * rad_t(L):
+        warn = "Path end is inside the take-up reel at full size"
+
+    G_end = free_curve(r0, rad_t(L))[1][-1]
+    q = min(1.0, max(0.0, float(progress))) * (L + G_end)       # film fed through so far
+    o = L - q                                                    # film still on the supply
+    rs = rad_s(o)
+    sigma = 0.0                                                  # film already on the take-up
+    for _ in range(10):
+        pts, cum, dirs, phi_s, phi_t = free_curve(rs, rad_t(sigma))
+        new = min(L, max(0.0, L - o - float(cum[-1])))
+        done = abs(new - sigma) < 1e-9 * max(1.0, L)
+        sigma = new
+        if done:
+            break
+    rt = rad_t(sigma)
+    pts, cum, dirs, phi_s, phi_t = free_curve(rs, rt)
+    G = float(cum[-1])
+
+    N = len(s)
+    py = np.empty(N)
+    pz = np.empty(N)
+    ny = np.empty(N)
+    nz = np.empty(N)
+    m_sup = s < o
+    m_tak = (s > L - sigma) if sigma > 0.0 else np.zeros(N, dtype=bool)
+    m_free = ~(m_sup | m_tak)
+
+    if m_sup.any():                                              # supply spiral (rotated so its
+        th = np.interp(s[m_sup], arc_s, th_s)                    # outer end sits at the exit point)
+        r = r0 + b * th
+        phi = th - float(np.interp(o, arc_s, th_s)) + phi_s
+        c, sn = np.cos(phi), np.sin(phi)
+        ty, tz = b * c - r * sn, b * sn + r * c
+        ln = np.hypot(ty, tz)
+        ty, tz = ty / ln, tz / ln
+        ny[m_sup], nz[m_sup] = tz, -ty
+        py[m_sup] = r * c + z[m_sup] * tz
+        pz[m_sup] = r * sn - z[m_sup] * ty
+
+    if m_tak.any():                                              # take-up spiral
+        th = np.interp(L - s[m_tak], arc_t, th_t)
+        r = r0t + b * th
+        phi = phi_t + eps_t * (float(np.interp(sigma, arc_t, th_t)) - th)
+        c, sn = np.cos(phi), np.sin(phi)
+        den = np.sqrt(r * r + b * b)
+        ty = (-b * c - eps_t * r * sn) / den
+        tz = (-b * sn + eps_t * r * c) / den
+        ny[m_tak], nz[m_tak] = tz, -ty
+        py[m_tak] = c_t[0] + r * c + z[m_tak] * tz
+        pz[m_tak] = c_t[1] + r * sn - z[m_tak] * ty
+
+    if m_free.any():                                             # free run: bridge, path, bridge
+        u = np.clip(s[m_free] - o, 0.0, G)
+        idx = np.clip(np.searchsorted(cum, u, side='right') - 1, 0, len(dirs) - 1)
+        ty, tz = dirs[idx, 0], dirs[idx, 1]
+        ny[m_free], nz[m_free] = tz, -ty
+        py[m_free] = np.interp(u, cum, pts[:, 0]) + z[m_free] * tz
+        pz[m_free] = np.interp(u, cum, pts[:, 1]) - z[m_free] * ty
+
+    pos = np.stack([x, py, pz], axis=1)
+    vnorm = np.stack([np.zeros(N), ny, nz], axis=1)
+    return pos, vnorm, warn, L + G_end
+
+
+def pitch_mm_for(film_size):
+    return MESH_PITCH * FILM_WIDTH[film_size] / MESH_WIDTH
+
+
+MM_TO_M = 0.001
+
+
+def base_units_per_mm(scene):
+    """Blender units that equal 1 mm of REAL film in this scene.
+
+    Blender's default is 1 BU = 1 m, so 1 mm = 0.001 BU and a 35 mm film is 0.035 BU wide.
+    If the scene's Unit Scale is changed (Scene > Units > Unit Scale) the result follows it,
+    e.g. Unit Scale 0.001 (1 BU = 1 mm) gives 1.0, so 35 mm film is 35 BU wide.
+    With the unit system set to None, 1 BU is treated as 1 m.
+    """
+    us = scene.unit_settings
+    if us.system == 'NONE' or us.scale_length <= 0.0:
+        return MM_TO_M
+    return MM_TO_M / us.scale_length
+
+
+def units_per_mm(scene, fr):
+    """Blender units per mm of film, including the optional size multiplier."""
+    return base_units_per_mm(scene) * fr.scale_multiplier
+
+
+def film_width_m(fr):
+    """Real-world width in metres the film strip is built at (before Unit Scale)."""
+    return FILM_WIDTH[fr.film_size] * MM_TO_M * fr.scale_multiplier
+
+
+def aspect_text(a):
+    """'16:9 (1.78)' for a standard ratio (within 1.5 %), else '1.43:1'."""
+    for _id, label, v in ASPECT_PRESETS:
+        if abs(v - a) / a < 0.015:
+            return label
+    return "%.2f:1" % a
+
+
+def dims_for_limit(w, h, lim):
+    """Size after capping the longest side at lim px (0 = no cap, never upscales)."""
+    m = max(w, h)
+    if lim and m > lim:
+        k = lim / float(m)
+        return max(1, int(round(w * k))), max(1, int(round(h * k)))
+    return w, h
+
+
+def picture_mapping(src_w, src_h, target_aspect, fit):
+    """UV mapping that shows the source image at `target_aspect` on a frame.
+
+    The picture rectangle (aspect `target_aspect`) is the largest one that fits,
+    centred, in the frame's picture window (aspect MESH_IMG_ASPECT). Inside it
+    the image is stretched over the whole rectangle (fit 'STRETCH') or keeps its
+    own proportions and is cropped to fill it (fit 'CROP').
+
+    Returns None when the plain UVs already do the job, otherwise
+    (scale_x, scale_y, offset_x, offset_y, clip, mask):
+      * the first four feed a Mapping node (texture_coord = uv * scale + offset);
+      * clip is True when the leftover window area can simply be left to the
+        texture's CLIP extension (picture smaller than the window, image not cropped);
+      * mask is None, or (scale_x, scale_y, offset_x, offset_y) mapping uv to
+        picture-rectangle coordinates (0..1 inside), for the one case CLIP can't
+        handle: a picture that is both cropped and smaller than the window.
+    """
+    win = MESH_IMG_ASPECT
+    ta = max(0.05, float(target_aspect))
+    if abs(ta - win) < 1e-4:
+        fw = fh = 1.0
+    elif ta > win:
+        fw, fh = 1.0, win / ta
+    else:
+        fw, fh = ta / win, 1.0
+    sx = sy = 1.0
+    if fit == 'CROP' and src_w > 0 and src_h > 0:
+        ia = src_w / float(src_h)
+        if abs(ia - ta) >= 1e-4:
+            if ia > ta:
+                sx = ta / ia
+            else:
+                sy = ia / ta
+    letterboxed = fw < 1.0 - 1e-6 or fh < 1.0 - 1e-6
+    cropped = sx != 1.0 or sy != 1.0
+    if not letterboxed and not cropped:
+        return None
+    # picture-rectangle coords r = (uv - (1 - f) / 2) / f, texture = r * s + (1 - s) / 2
+    mask = None
+    if letterboxed and cropped:
+        mask = (1.0 / fw, 1.0 / fh, -(1.0 - fw) / (2.0 * fw), -(1.0 - fh) / (2.0 * fh))
+    return (sx / fw, sy / fh,
+            -(1.0 - fw) / (2.0 * fw) * sx + (1.0 - sx) * 0.5,
+            -(1.0 - fh) / (2.0 * fh) * sy + (1.0 - sy) * 0.5,
+            letterboxed and not cropped, mask)
+
+
+# ----------------------------------------------------------------------------
+# Properties
+# ----------------------------------------------------------------------------
+class FilmReelFile(PropertyGroup):
+    name: StringProperty()
+
+
+def _fps_value(fr):
+    if fr.fps_preset == 'CUSTOM':
+        return max(0.001, fr.custom_fps)
+    return float(fr.fps_preset)
+
+
+def yielded_frames(fr):
+    if fr.src_frames <= 0:
+        return 0
+    dur = fr.src_frames / max(0.001, fr.source_fps)
+    return max(1, int(round(dur * _fps_value(fr))))
+
+
+def recommended_frames(fr):
+    return min(yielded_frames(fr), RECOMMENDED_MAX)
+
+
+def effective_range(fr):
+    """(first, last) reel frame to build, 1-based and inclusive, clamped to the clip."""
+    y = max(1, yielded_frames(fr))
+    first = min(max(1, fr.frame_start), y)
+    last = min(max(first, fr.frame_end), y)
+    return first, last
+
+
+def effective_frames(fr):
+    first, last = effective_range(fr)
+    return last - first + 1
+
+
+def source_aspect(fr):
+    if fr.src_width > 0 and fr.src_height > 0:
+        return fr.src_width / float(fr.src_height)
+    return MESH_IMG_ASPECT
+
+
+def picture_aspect(fr):
+    """Width / height the picture is shown at on each frame."""
+    p = fr.aspect_preset
+    if p == 'RECOMMENDED':
+        return source_aspect(fr)
+    if p == 'WINDOW':
+        return MESH_IMG_ASPECT
+    if p == 'CUSTOM':
+        return max(0.05, fr.custom_aspect)
+    return ASPECT_VALUE.get(p, MESH_IMG_ASPECT)
+
+
+def recommended_resolution(fr):
+    """Longest-side cap in px for the frame textures (0 = original size).
+
+    The source's own size, stepped down through RESOLUTION_STEPS only as far as
+    needed for the chosen frame range to fit in MEMORY_BUDGET_GB. Never upscales.
+    Video frames can't be resampled, so they always stay native (0).
+    """
+    m = max(fr.src_width, fr.src_height)
+    if fr.source_type != 'SEQUENCE' or m <= 0:
+        return 0
+    unique = max(1, len(set(source_index_map(fr))))
+    candidates = [0] + [s for s in RESOLUTION_STEPS if s < m]
+    for lim in candidates:
+        w, h = dims_for_limit(fr.src_width, fr.src_height, lim)
+        if unique * w * h * 4 / (1024 ** 3) <= MEMORY_BUDGET_GB:
+            return lim
+    return candidates[-1]
+
+
+def resolved_limit(fr):
+    """Longest-side cap actually used for the frame textures (0 = original)."""
+    if fr.max_image_size == 'RECOMMENDED':
+        return recommended_resolution(fr)
+    return int(fr.max_image_size)
+
+
+def target_dims(fr):
+    w, h = fr.src_width, fr.src_height
+    if fr.source_type == 'SEQUENCE':
+        return dims_for_limit(w, h, resolved_limit(fr))
+    return w, h
+
+
+def render_size_for(fr):
+    """Scene render size for the chosen picture aspect, at the chosen resolution."""
+    w, h = target_dims(fr)
+    long_side = float(max(w, h))
+    a = picture_aspect(fr)
+    rw, rh = (long_side, long_side / a) if a >= 1.0 else (long_side * a, long_side)
+
+    def even(v):
+        return max(4, int(round(v / 2.0)) * 2)
+    return even(rw), even(rh)
+
+
+def source_index_map(fr):
+    """Source frame index for each of the frames on the reel.
+
+    The reel covers the chosen Start..End range (1-based, inclusive) of the
+    clip, in chronological order, at the chosen frame rate.
+    """
+    first, last = effective_range(fr)
+    ratio = fr.source_fps / _fps_value(fr)
+    return [min(fr.src_frames - 1, int(j * ratio + 1e-6)) for j in range(first - 1, last)]
+
+
+def memory_gb(fr):
+    w, h = target_dims(fr)
+    unique = len(set(source_index_map(fr)))
+    return unique * w * h * 4 / (1024 ** 3)
+
+
+def _start_changed(self, context):
+    if self.frame_end < self.frame_start:
+        self.frame_end = self.frame_start
+
+
+def _end_changed(self, context):
+    if self.frame_start > self.frame_end:
+        self.frame_start = self.frame_end
+
+
+def _end_a_edited(self, context):
+    if self.end_obj_a is not None:      # typing coordinates overrides the picked object
+        self.end_obj_a = None
+
+
+def _end_b_edited(self, context):
+    if self.end_obj_b is not None:
+        self.end_obj_b = None
+
+
+class FilmReelSettings(PropertyGroup):
+    # --- source
+    source_type: EnumProperty(items=[('NONE', "None", ""), ('SEQUENCE', "Image Sequence", ""),
+                                     ('VIDEO', "Video", "")], default='NONE')
+    directory: StringProperty(subtype='DIR_PATH')
+    files: CollectionProperty(type=FilmReelFile)
+    src_width: IntProperty(default=0)
+    src_height: IntProperty(default=0)
+    src_frames: IntProperty(default=0)
+    source_fps: FloatProperty(name="Source FPS", default=24.0, min=0.001, max=1000.0,
+                              precision=3, description="Frame rate of the loaded footage")
+    # --- main settings
+    fps_preset: EnumProperty(name="Frame Rate", items=FPS_ITEMS, default='24',
+                             description="Frame rate the reel is sampled at")
+    custom_fps: FloatProperty(name="Custom FPS", default=24.0, min=0.001, max=1000.0, precision=3)
+    film_size: EnumProperty(name="Film Size", items=FILM_SIZE_ITEMS, default='35MM')
+    frame_start: IntProperty(
+        name="Start Frame", default=1, min=1, max=100000, update=_start_changed,
+        description="First frame of the reel. Frames are counted from 1 at the chosen frame rate "
+                    "(position in the clip, not the number in the file name)")
+    frame_end: IntProperty(
+        name="End Frame", default=1, min=1, max=100000, update=_end_changed,
+        description="Last frame of the reel (inclusive). The reel holds every frame from Start to "
+                    "End, in chronological order")
+    # --- options
+    layout_mode: EnumProperty(
+        name="Layout",
+        items=[('STRAIGHT', "Straight Strip", "Frames laid end to end in a straight line"),
+               ('SPIRAL', "Wound Reel", "Strip wound in a spiral around a core (frame 1 at the core)")],
+        default='STRAIGHT')
+    stand_upright: BoolProperty(name="Stand Upright", default=True,
+                                description="Straight strip: stand it up facing the front view "
+                                            "(first frame on top). Off: lay it flat on the floor")
+    core_radius_mm: FloatProperty(name="Core Radius", default=60.0, min=1.0, soft_max=300.0,
+                                  description="Wound reel: radius of the core, in mm of film")
+    wind_spacing_mm: FloatProperty(name="Wind Spacing", default=1.0, min=0.01, soft_max=10.0,
+                                   description="Wound reel: radial growth per turn, in mm of film "
+                                               "(real film is ~0.14 mm; larger looks better)")
+    aspect_preset: EnumProperty(
+        name="Aspect Ratio", items=ASPECT_ITEMS, default='RECOMMENDED',
+        description="Shape of the picture on every frame. The picture is centred in the frame "
+                    "window, the rest stays black. Recommended matches the loaded footage")
+    custom_aspect: FloatProperty(
+        name="Custom Aspect", default=16.0 / 9.0, min=0.2, max=10.0, precision=3,
+        description="Picture width divided by height")
+    image_fit: EnumProperty(
+        name="Image Fit",
+        items=[('STRETCH', "Stretch", "Stretch the whole image over the chosen picture shape"),
+               ('CROP', "Crop to Fill",
+                "Keep the image's own aspect and crop its edges to fill the chosen picture shape")],
+        default='STRETCH',
+        description="What to do when the footage and the chosen aspect ratio differ "
+                    "(no effect while they match)")
+    max_image_size: EnumProperty(
+        name="Resolution", items=RESOLUTION_ITEMS, default='RECOMMENDED',
+        description="Longest side of every frame texture (image sequences only; "
+                    "video frames always decode at their native size)")
+    pack_images: BoolProperty(
+        name="Pack Images", default=False,
+        description="Embed downscaled frames in the .blend. Off: frames reload from disk at "
+                    "full resolution next time the file is opened")
+    # --- custom reel end positions (the two wound-up reel centres)
+    use_custom_ends: BoolProperty(
+        name="Custom Reel End Positions", default=False,
+        description="Wound reel: put the two reel centres (supply core and take-up core) at the "
+                    "positions below instead of at the 3D cursor")
+    end_a: FloatVectorProperty(
+        name="End A (Supply)", size=3, subtype='TRANSLATION', unit='LENGTH', default=(0.0, 0.0, 0.0),
+        update=_end_a_edited, description="World position of the supply reel centre (frame 1 at the core)")
+    end_b: FloatVectorProperty(
+        name="End B (Take-up)", size=3, subtype='TRANSLATION', unit='LENGTH', default=(0.3, 0.0, 0.0),
+        update=_end_b_edited, description="World position of the take-up reel centre")
+    end_obj_a: PointerProperty(
+        name="Object A", type=bpy.types.Object,
+        description="Set by 'Set Reel End Positions' from the selection. While set, Build uses this "
+                    "object's current origin for End A")
+    end_obj_b: PointerProperty(
+        name="Object B", type=bpy.types.Object,
+        description="Set by 'Set Reel End Positions' from the selection. While set, Build uses this "
+                    "object's current origin for End B")
+    scale_multiplier: FloatProperty(
+        name="Scale", default=1.0, min=0.01, max=1000.0, precision=3,
+        description="Size multiplier on top of true scale. 1.0 = real size (35 mm film is "
+                    "0.035 m wide, following the scene's Unit Scale). Use e.g. 10 for a "
+                    "film strip ten times larger than life")
+
+
+# ----------------------------------------------------------------------------
+# Materials
+# ----------------------------------------------------------------------------
+def _set(node, names, value):
+    if isinstance(names, str):
+        names = (names,)
+    for n in names:
+        s = node.inputs.get(n)
+        if s is not None:
+            try:
+                s.default_value = value
+            except Exception:
+                pass
+            return True
+    return False
+
+
+def _new_material(name):
+    mat = bpy.data.materials.new(name)
+    mat[MARK] = True
+    try:
+        mat.use_nodes = True
+    except Exception:
+        pass
+    nt = mat.node_tree
+    nt.nodes.clear()
+    return mat, nt
+
+
+def get_holder_material():
+    mat = bpy.data.materials.get("M_FilmHolder")
+    if mat is not None and mat.node_tree is not None:
+        return mat
+    mat, nt = _new_material("M_FilmHolder")
+    out = nt.nodes.new('ShaderNodeOutputMaterial')
+    out.location = (320, 0)
+    b = nt.nodes.new('ShaderNodeBsdfPrincipled')
+    b.location = (0, 0)
+    _set(b, 'Base Color', (0.0, 0.0, 0.0, 1.0))
+    _set(b, 'Metallic', 0.0)
+    _set(b, 'Roughness', 0.15)
+    _set(b, 'IOR', 1.5)
+    _set(b, 'Alpha', 1.0)
+    _set(b, 'Thin Wall', True)
+    nt.links.new(b.outputs['BSDF'], out.inputs['Surface'])
+    return mat
+
+
+def make_image_material(name, image=None, mapping=None, video_frame=None):
+    """M_FilmImage: image -> Base Color, Roughness 0, Transmission 1, Thin Wall.
+
+    mapping = from picture_mapping(): adds a Mapping node (and, for a cropped picture
+    smaller than the frame window, a mask) so the rest of the window renders black.
+    video_frame = 0-based frame of a movie (frozen via frame offset).
+    """
+    mat, nt = _new_material(name)
+    out = nt.nodes.new('ShaderNodeOutputMaterial')
+    out.location = (700, 0)
+    b = nt.nodes.new('ShaderNodeBsdfPrincipled')
+    b.location = (360, 0)
+    _set(b, 'Metallic', 0.0)
+    _set(b, 'Roughness', 0.0)
+    _set(b, 'IOR', 1.5)
+    _set(b, 'Alpha', 1.0)
+    _set(b, ('Transmission Weight', 'Transmission'), 1.0)
+    _set(b, 'Thin Wall', True)
+    tex = nt.nodes.new('ShaderNodeTexImage')
+    tex.location = (0, 0)
+    tex.interpolation = 'Linear'
+    tex.projection = 'FLAT'
+    tex.extension = 'CLIP' if (mapping is not None and mapping[4]) else 'REPEAT'
+    if image is not None:
+        tex.image = image
+    if video_frame is not None:
+        iu = tex.image_user
+        iu.frame_start = 1
+        iu.frame_duration = 1
+        iu.frame_offset = int(video_frame)
+        iu.use_cyclic = False
+        iu.use_auto_refresh = True
+    color_out = tex.outputs['Color']
+    if mapping is not None:
+        uv = nt.nodes.new('ShaderNodeUVMap')
+        uv.location = (-520, -20)
+        mp = nt.nodes.new('ShaderNodeMapping')
+        mp.location = (-260, -20)
+        mp.vector_type = 'POINT'
+        mp.inputs['Location'].default_value = (mapping[2], mapping[3], 0.0)
+        mp.inputs['Scale'].default_value = (mapping[0], mapping[1], 1.0)
+        nt.links.new(uv.outputs['UV'], mp.inputs['Vector'])
+        nt.links.new(mp.outputs['Vector'], tex.inputs['Vector'])
+        if mapping[5] is not None:
+            # 1 inside the picture rectangle, 0 outside: floor(r) == 0 on both axes
+            mr = nt.nodes.new('ShaderNodeMapping')
+            mr.location = (-260, -320)
+            mr.vector_type = 'POINT'
+            mr.inputs['Location'].default_value = (mapping[5][2], mapping[5][3], 0.0)
+            mr.inputs['Scale'].default_value = (mapping[5][0], mapping[5][1], 1.0)
+            nt.links.new(uv.outputs['UV'], mr.inputs['Vector'])
+            fl = nt.nodes.new('ShaderNodeVectorMath')
+            fl.operation = 'FLOOR'
+            fl.location = (0, -320)
+            nt.links.new(mr.outputs['Vector'], fl.inputs[0])
+            ln = nt.nodes.new('ShaderNodeVectorMath')
+            ln.operation = 'LENGTH'
+            ln.location = (180, -320)
+            nt.links.new(fl.outputs['Vector'], ln.inputs[0])
+            inside = nt.nodes.new('ShaderNodeMath')
+            inside.operation = 'LESS_THAN'
+            inside.location = (360, -320)
+            inside.inputs[1].default_value = 0.5
+            nt.links.new(ln.outputs['Value'], inside.inputs[0])
+            sc = nt.nodes.new('ShaderNodeVectorMath')
+            sc.operation = 'SCALE'
+            sc.location = (180, 0)
+            nt.links.new(tex.outputs['Color'], sc.inputs[0])
+            nt.links.new(inside.outputs['Value'], sc.inputs['Scale'])
+            color_out = sc.outputs['Vector']
+    nt.links.new(color_out, b.inputs['Base Color'])
+    nt.links.new(b.outputs['BSDF'], out.inputs['Surface'])
+    return mat
+
+
+# ----------------------------------------------------------------------------
+# Unwind along a path: per-reel settings, live mesh update, handlers
+# ----------------------------------------------------------------------------
+_MESH_CACHE = []
+_SIG = {}
+_BUSY = [False]
+HELPER = "film_reel_helper"
+
+
+def _decoded():
+    if not _MESH_CACHE:
+        _MESH_CACHE.append(decode_mesh())
+    return _MESH_CACHE[0]
+
+
+def reel_strip(col):
+    """The strip object of a reel collection."""
+    if col is None:
+        return None
+    return next((o for o in col.objects if o.get(MARK) and o.type == 'MESH'), None)
+
+
+def _unwind_params_changed(self, context):
+    ob = self.id_data
+    _SIG.pop(ob.name, None)
+    try:
+        update_unwind_reel(ob)
+    except Exception as e:  # never break the UI over a refresh
+        print("Film Reel unwind:", e)
+
+
+class FilmReelUnwind(PropertyGroup):
+    # --- remembered from the build, needed to re-bend the strip
+    built_spiral: BoolProperty(default=False)
+    n_frames: IntProperty(default=0)
+    film_scale: FloatProperty(default=1.0, precision=9)
+    core_r: FloatProperty(default=0.0, precision=9)
+    wind: FloatProperty(default=0.0, precision=9)
+    units_per_mm: FloatProperty(default=0.001, precision=9)
+    status: StringProperty()
+    total_length: FloatProperty(default=0.0, precision=9)   # film length fed from progress 0 -> 1
+    # --- user settings
+    enabled: BoolProperty(default=False)
+    progress: FloatProperty(
+        name="Unwind", default=0.0, min=0.0, max=1.0, subtype='FACTOR',
+        update=_unwind_params_changed,
+        description="0 = all film on the supply reel, 1 = all of it re-wound on the take-up reel. "
+                    "Animate this value (I over the slider) to play the unwind")
+    step_frames: FloatProperty(
+        name="Arrow Step", default=1.0, min=0.01, soft_max=50.0, precision=2,
+        description="How many film frames the arrows beside the Unwind slider move the film "
+                    "along the path (or back it up) per click")
+    path: PointerProperty(
+        name="Path", type=bpy.types.Object, update=_unwind_params_changed,
+        poll=lambda self, ob: ob.type == 'CURVE',
+        description="Curve the free film follows from the supply reel to the take-up reel. "
+                    "It is flattened onto the reel's plane (the plane across the reel axis)")
+    takeup: PointerProperty(
+        name="Take-up Reel", type=bpy.types.Object, update=_unwind_params_changed,
+        description="Object marking the centre of the take-up reel (an Empty works well). "
+                    "Its position is used, flattened onto the reel's plane")
+    takeup_core_mm: FloatProperty(
+        name="Take-up Core Radius", default=60.0, min=1.0, soft_max=300.0,
+        update=_unwind_params_changed, description="Radius of the take-up reel's core, in mm of film")
+    path_segments: IntProperty(
+        name="Path Subdivisions", default=1, min=1, max=64,
+        description="Number of segments (axes) the film path is divided into. 1 = a single "
+                    "straight run; every extra segment adds a control point you can move to bend the path")
+    takeup_reverse: BoolProperty(
+        name="Reverse Take-up", default=False, update=_unwind_params_changed,
+        description="Wind the take-up reel the opposite way round to the supply reel "
+                    "(film goes over one reel and under the other)")
+
+
+def _curve_world_points(ob, depsgraph=None):
+    """First spline of a curve object, as world-space points (m x 3)."""
+    local = _curve_local_points(ob, depsgraph)
+    if not len(local):
+        return np.zeros((0, 3))
+    M = np.array(ob.matrix_world)
+    return local @ M[:3, :3].T + M[:3, 3]
+
+
+def _curve_local_points(ob, depsgraph=None):
+    """First spline of a curve object, as points in the curve's own space (m x 3)."""
+    cu = ob.data
+    if not cu.splines:
+        return np.zeros((0, 3))
+    sp = cu.splines[0]
+    pts = []
+    if sp.type == 'BEZIER':
+        bp = sp.bezier_points
+        cnt = len(bp)
+        segs = cnt if (sp.use_cyclic_u and cnt > 2) else cnt - 1
+        t = np.linspace(0.0, 1.0, 32, endpoint=False)[:, None]
+        for i in range(max(segs, 0)):
+            a, c = bp[i], bp[(i + 1) % cnt]
+            p0, p1, p2, p3 = (np.array(v[:]) for v in (a.co, a.handle_right, c.handle_left, c.co))
+            pts.append((1 - t) ** 3 * p0 + 3 * (1 - t) ** 2 * t * p1 + 3 * (1 - t) * t * t * p2 + t ** 3 * p3)
+        if cnt:
+            pts.append(np.array(bp[0 if (sp.use_cyclic_u and cnt > 2) else cnt - 1].co[:])[None, :])
+        local = np.vstack(pts) if pts else np.zeros((0, 3))
+    elif sp.type == 'POLY':
+        local = np.array([p.co[:3] for p in sp.points], dtype=np.float64).reshape(-1, 3)
+        if sp.use_cyclic_u and len(local) > 2:
+            local = np.vstack([local, local[:1]])
+    else:   # NURBS etc: use the evaluated curve
+        dg = depsgraph or bpy.context.evaluated_depsgraph_get()
+        eob = ob.evaluated_get(dg)
+        me = eob.to_mesh()
+        try:
+            local = np.array([v.co[:] for v in me.vertices], dtype=np.float64).reshape(-1, 3)
+        finally:
+            eob.to_mesh_clear()
+    return local
+
+
+def resample_polyline(pts, segments):
+    """Evenly (by arc length) resample a polyline into `segments` segments -> segments+1 points."""
+    pts = np.asarray(pts, dtype=np.float64).reshape(-1, 3)
+    segments = max(1, int(segments))
+    if len(pts) < 2:
+        return np.repeat(pts[:1], segments + 1, axis=0) if len(pts) else np.zeros((segments + 1, 3))
+    seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    cum = np.concatenate(([0.0], np.cumsum(seg)))
+    if cum[-1] < 1e-12:
+        return np.repeat(pts[:1], segments + 1, axis=0)
+    t = np.linspace(0.0, cum[-1], segments + 1)
+    return np.stack([np.interp(t, cum, pts[:, k]) for k in range(3)], axis=1)
+
+
+def set_path_points(curve_ob, pts, smooth):
+    """Replace the curve's splines with ONE bezier spline through pts (curve-local coords)."""
+    cu = curve_ob.data
+    cu.splines.clear()
+    sp = cu.splines.new('BEZIER')
+    sp.bezier_points.add(len(pts) - 1)
+    htype = 'AUTO' if smooth else 'VECTOR'
+    for bp, co in zip(sp.bezier_points, pts):
+        bp.co = tuple(float(c) for c in co)
+        bp.handle_left_type = bp.handle_right_type = htype
+    sp.use_cyclic_u = False
+    for bp in sp.bezier_points:          # second pass: handles depend on neighbours, so
+        bp.handle_left_type = bp.handle_right_type = htype   # force a recalculation now
+
+
+def _apply_to_mesh(mesh, pos, vnorm=None, lnorm=None):
+    mesh.vertices.foreach_set("co", np.ascontiguousarray(pos, dtype=np.float32).ravel())
+    mesh.update()
+    try:
+        if lnorm is None:
+            loop_v = np.empty(len(mesh.loops), dtype=np.int32)
+            mesh.loops.foreach_get("vertex_index", loop_v)
+            lnorm = vnorm[loop_v]
+        mesh.normals_split_custom_set(np.asarray(lnorm).tolist())
+    except Exception:
+        pass
+    mesh.update()
+
+
+def update_unwind_reel(ob, depsgraph=None):
+    """Re-bend a reel's strip for its current unwind progress."""
+    if _BUSY[0] or ob is None or ob.type != 'MESH' or not ob.get(MARK):
+        return
+    uw = ob.film_reel_unwind
+    if not uw.enabled or not uw.built_spiral or uw.path is None or uw.takeup is None:
+        return
+    mesh = ob.data
+    verts = _decoded()[0]
+    if uw.n_frames * len(verts) != len(mesh.vertices):
+        return
+    Minv = np.array(ob.matrix_world.inverted())
+
+    def to_local(P):                     # world points (m x 3) -> reel plane (m x 2: local Y, Z)
+        q = P @ Minv[:3, :3].T + Minv[:3, 3]
+        return q[:, 1:3]
+
+    world = _curve_world_points(uw.path, depsgraph)
+    if len(world) < 2:
+        return
+    path = to_local(world)
+    c_t = to_local(np.array([uw.takeup.matrix_world.translation[:]]))[0]
+    sig = (round(uw.progress, 6), path.tobytes(), c_t.tobytes(), uw.takeup_core_mm,
+           uw.takeup_reverse, uw.n_frames)
+    if _SIG.get(ob.name) == sig:
+        return
+    _BUSY[0] = True
+    try:
+        pos, vnorm, warn, total = unwind_geometry(
+            verts, uw.film_scale, uw.n_frames, uw.core_r, uw.wind,
+            uw.takeup_core_mm * uw.units_per_mm, uw.takeup_reverse, path, c_t, uw.progress)
+        _apply_to_mesh(mesh, pos, vnorm=vnorm)
+        _SIG[ob.name] = sig
+        if uw.status != warn:
+            uw.status = warn
+        if abs(uw.total_length - total) > 1e-6:
+            uw.total_length = total
+    finally:
+        _BUSY[0] = False
+
+
+def restore_wound_reel(ob):
+    """Put the strip back into its plain wound-reel shape."""
+    uw = ob.film_reel_unwind
+    verts, faces, mats, uvs = _decoded()
+    pos, _f, lnorm, _m, _u = strip_geometry(verts, faces, mats, uvs, uw.film_scale, uw.n_frames,
+                                            'SPIRAL', uw.core_r, uw.wind)
+    _apply_to_mesh(ob.data, pos, lnorm=lnorm)
+    _SIG.pop(ob.name, None)
+
+
+@bpy.app.handlers.persistent
+def _unwind_frame_handler(scene, depsgraph=None):
+    for ob in scene.objects:
+        if ob.type == 'MESH' and ob.get(MARK):
+            try:
+                update_unwind_reel(ob, depsgraph)
+            except Exception as e:
+                print("Film Reel unwind:", e)
+
+
+@bpy.app.handlers.persistent
+def _unwind_depsgraph_handler(scene, depsgraph=None):
+    """Keep every unwinding reel in step when the reel, its path or its take-up is moved,
+    rotated or reshaped (the signature check makes this a no-op when nothing relevant changed)."""
+    if _BUSY[0]:
+        return
+    for ob in scene.objects:
+        if ob.type == 'MESH' and ob.get(MARK) and ob.film_reel_unwind.enabled:
+            try:
+                update_unwind_reel(ob, depsgraph)
+            except Exception as e:
+                print("Film Reel unwind:", e)
+
+
+# ----------------------------------------------------------------------------
+# Build
+# ----------------------------------------------------------------------------
+def build_strip_mesh(scale, n, mode, r0, wind):
+    verts, faces, mats, uvs = decode_mesh()
+    pos, all_faces, lnorm, mat_idx, uv_all = strip_geometry(verts, faces, mats, uvs, scale,
+                                                           n, mode, r0, wind)
+    mesh = bpy.data.meshes.new("Film Reel Strip")
+    mesh[MARK] = True
+    mesh.from_pydata(pos.tolist(), [], all_faces)
+    mesh.uv_layers.new(name="UVMap").data.foreach_set("uv", uv_all)
+    mesh.polygons.foreach_set("material_index", mat_idx.tolist())
+    mesh.polygons.foreach_set("use_smooth", [True] * len(mesh.polygons))
+    mesh.update()
+    try:  # the source model has all normals pointing along the film's face normal
+        mesh.normals_split_custom_set(lnorm.tolist())
+    except Exception:
+        pass
+    return mesh
+
+
+def _walk_collections(col):
+    for c in col.children:
+        yield c
+        yield from _walk_collections(c)
+
+
+def reel_collections(scene):
+    """Every film reel collection made by this add-on that lives in the scene."""
+    return [c for c in _walk_collections(scene.collection) if c.get(MARK)]
+
+
+def reel_serial(col):
+    return int(col.get(SERIAL, 0))
+
+
+def target_reel(context):
+    """The reel 'Replace' acts on: the one holding the active object, else the newest."""
+    reels = reel_collections(context.scene)
+    if not reels:
+        return None
+    ob = context.view_layer.objects.active
+    if ob is not None:
+        for c in ob.users_collection:
+            if c in reels:
+                return c
+    return max(reels, key=reel_serial)
+
+
+def remove_reel(col, keep=()):
+    """Delete a reel collection and its orphaned datablocks. `keep` lists datablocks that must
+    survive even though nothing uses them yet (the new reel's mesh while it is being built -
+    without this the clean-up below deleted it and Replace Reel failed with 'StructRNA of type
+    Mesh has been removed')."""
+    keep_ptr = {d.as_pointer() for d in keep if d is not None}
+    for ob in list(col.all_objects):
+        bpy.data.objects.remove(ob, do_unlink=True)
+    bpy.data.collections.remove(col)
+    for coll in (bpy.data.meshes, bpy.data.materials, bpy.data.images):
+        for d in list(coll):
+            if d.get(MARK) and d.users == 0 and d.as_pointer() not in keep_ptr:
+                coll.remove(d)
+
+
+def resolve_end_positions(fr):
+    """World positions (End A, End B) as mathutils Vectors. A picked object wins over typed
+    coordinates and is read at call time, so Build always uses where the object is now."""
+    from mathutils import Vector
+    a = fr.end_obj_a.matrix_world.translation.copy() if fr.end_obj_a else Vector(fr.end_a)
+    b = fr.end_obj_b.matrix_world.translation.copy() if fr.end_obj_b else Vector(fr.end_b)
+    return a, b
+
+
+def ends_rotation_matrix(a, b):
+    """3x3 (numpy) whose columns are the reel's local X (axis), Y, Z in world space, chosen so the
+    line a -> b lies in the reel plane and runs along local -Y (where the take-up sits).
+    The axis is horizontal where possible, so two points at the same height give an upright reel."""
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    d = b - a
+    d = d / np.linalg.norm(d)
+    axis = np.cross([0.0, 0.0, 1.0], d)
+    if np.linalg.norm(axis) < 1e-6:                       # the ends are stacked vertically
+        axis = np.array([0.0, 1.0, 0.0])
+    axis = axis / np.linalg.norm(axis)
+    y = -d
+    z = np.cross(axis, y)
+    return np.stack([axis, y, z], axis=1)
+
+
+def _full_radius(core_r, wind, length, pitch):
+    b = wind / (2.0 * math.pi)
+    arc, th = spiral_table(core_r, b, length + pitch)
+    return core_r + b * float(np.interp(length, arc, th))
+
+
+def create_unwind_helpers(context, ob, takeup_dist=None):
+    """Create the take-up marker and path curve of a wound reel when they are missing, and make
+    both children of the reel so moving / rotating the reel carries them along as ONE unit
+    (they used to be loose, so a moved reel no longer matched its path and the film folded)."""
+    from mathutils import Matrix, Vector
+    uw = ob.film_reel_unwind
+    scene = context.scene
+    context.view_layer.update()
+    M = ob.matrix_world.copy()
+    ys = [v[1] for v in _decoded()[0]]
+    pitch = (max(ys) - min(ys)) * uw.film_scale
+    L = uw.n_frames * pitch
+    r_full = _full_radius(uw.core_r, uw.wind, L, pitch)
+    r0t = uw.takeup_core_mm * uw.units_per_mm
+    r_t_full = _full_radius(r0t, uw.wind, L, pitch)
+    dist = takeup_dist if takeup_dist else 4.0 * r_full
+
+    if uw.takeup is None:
+        em = bpy.data.objects.new("Film Reel Take-up", None)
+        em.empty_display_type = 'CIRCLE'
+        em.empty_display_size = r0t
+        em[HELPER] = True
+        scene.collection.objects.link(em)
+        em.matrix_world = M @ Matrix.Translation((0.0, -dist, 0.0)) @ Matrix.Rotation(math.radians(90.0), 4, 'Y')
+        uw.takeup = em
+    if uw.path is None:
+        cu = bpy.data.curves.new("Film Reel Path", 'CURVE')
+        cu.dimensions = '3D'
+        pob = bpy.data.objects.new("Film Reel Path", cu)
+        pob[HELPER] = True
+        scene.collection.objects.link(pob)
+        n = max(1, int(uw.path_segments))
+        a = np.array([0.0, 0.0, r_full])
+        b = np.array([0.0, -dist, r_t_full])
+        pts = [M @ Vector(tuple(a + (b - a) * (i / n))) for i in range(n + 1)]
+        set_path_points(pob, [tuple(v) for v in pts], smooth=False)
+        uw.path = pob
+    adopt_helpers(ob)
+    context.view_layer.update()
+
+
+def adopt_helpers(ob):
+    """Parent the reel's path and take-up to the reel, keeping where they are in the world."""
+    uw = ob.film_reel_unwind
+    for h in (uw.path, uw.takeup):
+        if h is None or h.parent == ob or h == ob:
+            continue
+        mw = h.matrix_world.copy()
+        h.parent = ob
+        h.matrix_parent_inverse = ob.matrix_world.inverted()
+        h.matrix_world = mw
+
+
+def build_reel(context, fr, replace_col=None):
+    """Build a reel. With replace_col, that earlier reel is swapped out (after the
+    new one has been built successfully, so a failure never loses the old reel)."""
+    scene = context.scene
+    upm = units_per_mm(scene, fr)              # Blender units per real mm of film
+    scale = FILM_WIDTH[fr.film_size] / MESH_WIDTH * upm
+    idx_map = source_index_map(fr)
+    n = len(idx_map)
+    first_frame = effective_range(fr)[0]
+    serial = max([reel_serial(c) for c in bpy.data.collections if c.get(MARK)] + [0]) + 1
+
+    # --- images (one datablock per distinct source frame) and one material per frame
+    images, mats = {}, []
+    names = [f.name for f in fr.files]
+    wm = context.window_manager
+    wm.progress_begin(0, n)
+    limit = resolved_limit(fr)
+    mapping = picture_mapping(fr.src_width, fr.src_height, picture_aspect(fr), fr.image_fit)
+    try:
+        for k, src in enumerate(idx_map):
+            if src not in images:
+                if fr.source_type == 'SEQUENCE':
+                    img = bpy.data.images.load(os.path.join(fr.directory, names[src]),
+                                               check_existing=False)
+                    img[MARK] = True
+                    w, h = img.size
+                    if limit and max(w, h) > limit:
+                        kk = limit / float(max(w, h))
+                        img.scale(max(1, int(round(w * kk))), max(1, int(round(h * kk))))
+                        if fr.pack_images:
+                            try:
+                                img.pack(as_png=True)
+                            except Exception:
+                                pass
+                else:
+                    img = bpy.data.images.load(fr.directory, check_existing=False)
+                    img[MARK] = True
+                images[src] = img
+            img = images[src]
+            mats.append(make_image_material("M_FilmImage_R%d_%04d" % (serial, first_frame + k),
+                                            img, mapping,
+                                            video_frame=src if fr.source_type == 'VIDEO' else None))
+            wm.progress_update(k)
+    finally:
+        wm.progress_end()
+
+    # --- one continuous strip mesh: frame edges touch, all frames in a single object
+    mesh = build_strip_mesh(scale, n, fr.layout_mode,
+                            fr.core_radius_mm * upm,
+                            fr.wind_spacing_mm * upm)
+    mesh.materials.append(get_holder_material())       # slot 0: base + perforations
+    for m in mats:                                       # slot k+1: picture of frame k
+        mesh.materials.append(m)
+
+    # --- custom reel end positions (wound reel only)
+    ends = None
+    if fr.use_custom_ends and fr.layout_mode == 'SPIRAL':
+        ends = resolve_end_positions(fr)
+        if (ends[1] - ends[0]).length < 1e-6:
+            raise ValueError("Reel End A and End B are at the same position")
+
+    # --- swap out the old reel only now that the new one is ready; keep its names
+    col_name, ob_name = COLLECTION_NAME, ROOT_NAME
+    old_uw = None
+    old_helper_world = {}
+    old_xf = None
+    old_flip = (False, False)
+    if replace_col is not None:
+        col_name = replace_col.name
+        ob_name = next((o.name for o in replace_col.objects if o.get(MARK)), ROOT_NAME)
+        old_flip = reel_flip_state(replace_col)
+        old_strip = reel_strip(replace_col)
+        if old_strip is not None:
+            u = old_strip.film_reel_unwind
+            old_uw = (u.enabled, u.path, u.takeup, u.takeup_core_mm, u.takeup_reverse, u.progress,
+                      u.path_segments)
+            if old_strip.parent is None:             # the new reel takes over the old one's place
+                old_xf = (old_strip.location.copy(), old_strip.rotation_euler.copy(), u.built_spiral)
+            for h in (u.path, u.takeup):             # remember where the helpers are: removing
+                if h is not None:                    # the old strip would un-parent them
+                    old_helper_world[h] = h.matrix_world.copy()
+        remove_reel(replace_col, keep=[mesh] + list(mats) + list(images.values()))
+        for h, mw in old_helper_world.items():
+            h.parent = None
+            h.matrix_world = mw
+
+    col = bpy.data.collections.new(col_name)
+    col[MARK] = True
+    col[SERIAL] = serial
+    scene.collection.children.link(col)
+    strip = bpy.data.objects.new(ob_name, mesh)
+    strip[MARK] = True
+    strip.location = scene.cursor.location
+    if fr.layout_mode == 'STRAIGHT':
+        strip.rotation_euler = (math.radians(90.0), 0.0, 0.0) if fr.stand_upright else (0.0, 0.0, 0.0)
+    elif ends is not None:
+        from mathutils import Matrix
+        R = ends_rotation_matrix(ends[0], ends[1])
+        strip.location = ends[0]
+        strip.rotation_euler = Matrix(R.tolist()).to_euler()
+    else:
+        strip.rotation_euler = (0.0, 0.0, math.radians(90.0))
+    if ends is None and old_xf is not None and old_xf[2] == (fr.layout_mode == 'SPIRAL'):
+        strip.location = old_xf[0]                   # Replace keeps the position / rotation of the
+        strip.rotation_euler = old_xf[1]             # reel it replaces (so its path still fits)
+    col.objects.link(strip)
+
+    for flipped, axis in zip(old_flip, 'HV'):            # a replaced reel keeps its flips
+        if flipped:
+            for m in mats:
+                flip_material(m, axis)
+
+    # remember what the unwind feature needs to re-bend this strip later
+    uw = strip.film_reel_unwind
+    uw.built_spiral = fr.layout_mode == 'SPIRAL'
+    uw.n_frames = n
+    uw.film_scale = scale
+    uw.core_r = fr.core_radius_mm * upm
+    uw.wind = fr.wind_spacing_mm * upm
+    uw.units_per_mm = upm
+    if old_uw is not None:
+        uw.path_segments = old_uw[6]
+    if ends is not None:
+        # fresh helpers: take-up marker exactly on End B, path between the two reels
+        uw.takeup_core_mm = old_uw[3] if old_uw is not None else uw.takeup_core_mm
+        if old_uw is not None:
+            uw.takeup_reverse = old_uw[4]
+            for h in old_helper_world:              # replaced helpers made by this add-on
+                if h.get(HELPER):
+                    hd = h.data
+                    bpy.data.objects.remove(h, do_unlink=True)
+                    if hd is not None and hd.users == 0 and isinstance(hd, bpy.types.Curve):
+                        bpy.data.curves.remove(hd)
+        context.view_layer.update()
+        create_unwind_helpers(context, strip, takeup_dist=(ends[1] - ends[0]).length)
+        if old_uw is not None and old_uw[0]:
+            uw.progress = old_uw[5]
+            uw.enabled = True
+            context.view_layer.update()
+            update_unwind_reel(strip)
+    elif old_uw is not None and uw.built_spiral and old_uw[0]:
+        uw.path, uw.takeup, uw.takeup_core_mm, uw.takeup_reverse, uw.progress = old_uw[1:6]
+        adopt_helpers(strip)
+        uw.enabled = True
+        context.view_layer.update()
+        update_unwind_reel(strip)
+
+    for ob in context.selected_objects:
+        ob.select_set(False)
+    strip.select_set(True)
+    context.view_layer.objects.active = strip
+    return n
+
+
+# ----------------------------------------------------------------------------
+# Operators
+# ----------------------------------------------------------------------------
+def _probe_image(path):
+    img = bpy.data.images.load(path, check_existing=False)
+    try:
+        w, h = img.size
+        frames = getattr(img, "frame_duration", 1) if img.source == 'MOVIE' else 1
+    finally:
+        bpy.data.images.remove(img)
+    return w, h, frames
+
+
+class FILMREEL_OT_load(Operator):
+    bl_idname = "film_reel.load_source"
+    bl_label = "Load Main Video"
+    bl_description = ("Pick an image sequence (select all frames, or just the first one) "
+                      "or a video file")
+
+    files: CollectionProperty(type=bpy.types.OperatorFileListElement,
+                              options={'HIDDEN', 'SKIP_SAVE'})
+    directory: StringProperty(subtype='DIR_PATH', options={'HIDDEN', 'SKIP_SAVE'})
+    filepath: StringProperty(subtype='FILE_PATH', options={'HIDDEN', 'SKIP_SAVE'})
+    filter_image: BoolProperty(default=True, options={'HIDDEN', 'SKIP_SAVE'})
+    filter_movie: BoolProperty(default=True, options={'HIDDEN', 'SKIP_SAVE'})
+    filter_folder: BoolProperty(default=True, options={'HIDDEN', 'SKIP_SAVE'})
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        fr = context.scene.film_reel
+        directory = bpy.path.abspath(self.directory)
+        names = [f.name for f in self.files if f.name]
+        if not names and self.filepath:
+            directory, fn = os.path.split(bpy.path.abspath(self.filepath))
+            names = [fn]
+        if not names:
+            self.report({'WARNING'}, "No file selected")
+            return {'CANCELLED'}
+        is_video = (len(names) == 1 and os.path.splitext(names[0])[1].lower() in movie_extensions())
+        try:
+            if is_video:
+                path = os.path.join(directory, names[0])
+                w, h, nframes = _probe_image(path)
+                fps = 0.0
+                try:
+                    clip = bpy.data.movieclips.load(path)
+                    fps = float(getattr(clip, "fps", 0.0))
+                    nframes = clip.frame_duration or nframes
+                    bpy.data.movieclips.remove(clip)
+                except Exception:
+                    pass
+                fr.source_type, fr.directory = 'VIDEO', path
+                fr.files.clear()
+                fr.files.add().name = names[0]
+            else:
+                names = expand_sequence(directory, names)
+                w, h, _ = _probe_image(os.path.join(directory, names[0]))
+                nframes, fps = len(names), 0.0
+                fr.source_type, fr.directory = 'SEQUENCE', directory
+                fr.files.clear()
+                for nme in names:
+                    fr.files.add().name = nme
+        except Exception as e:
+            self.report({'ERROR'}, "Could not read the source: %s" % e)
+            return {'CANCELLED'}
+        if w <= 0 or h <= 0 or nframes <= 0:
+            self.report({'ERROR'}, "Could not read image size / frame count")
+            return {'CANCELLED'}
+        fr.src_width, fr.src_height, fr.src_frames = w, h, nframes
+        fps = fps if fps > 0 else float(context.scene.render.fps) / context.scene.render.fps_base
+        fr.source_fps = fps
+        match = next((i for i, _, _ in FPS_ITEMS if i != 'CUSTOM' and abs(float(i) - fps) < 0.005), None)
+        if match:
+            fr.fps_preset = match
+        else:
+            fr.fps_preset, fr.custom_fps = 'CUSTOM', fps
+        fr.frame_start = 1
+        fr.frame_end = recommended_frames(fr)
+        return {'FINISHED'}
+
+
+class FILMREEL_OT_recommended(Operator):
+    bl_idname = "film_reel.recommended"
+    bl_label = "Recommended"
+    bl_description = ("Set the End Frame so the reel holds the recommended number of frames "
+                      "(capped at %d for performance), counting from the Start Frame" % RECOMMENDED_MAX)
+
+    def execute(self, context):
+        fr = context.scene.film_reel
+        first = effective_range(fr)[0]
+        fr.frame_start = first
+        fr.frame_end = min(yielded_frames(fr), first + RECOMMENDED_MAX - 1)
+        return {'FINISHED'}
+
+
+class FILMREEL_OT_all(Operator):
+    bl_idname = "film_reel.all_frames"
+    bl_label = "All Frames"
+    bl_description = "Use the whole clip: every frame it yields at the chosen frame rate"
+
+    def execute(self, context):
+        fr = context.scene.film_reel
+        fr.frame_start = 1
+        fr.frame_end = yielded_frames(fr)
+        return {'FINISHED'}
+
+
+class FILMREEL_OT_render_size(Operator):
+    bl_idname = "film_reel.set_render_size"
+    bl_label = "Set Render Size"
+    bl_options = {'REGISTER', 'UNDO'}
+    bl_description = ("Set the scene's render resolution to the chosen aspect ratio, using the "
+                      "chosen resolution as the longest side")
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.film_reel.src_frames > 0
+
+    def execute(self, context):
+        w, h = render_size_for(context.scene.film_reel)
+        r = context.scene.render
+        r.resolution_x, r.resolution_y, r.resolution_percentage = w, h, 100
+        self.report({'INFO'}, "Render size set to %d x %d" % (w, h))
+        return {'FINISHED'}
+
+
+class FILMREEL_OT_build(Operator):
+    bl_idname = "film_reel.build"
+    bl_label = "Build Film Reel"
+    bl_options = {'REGISTER', 'UNDO'}
+    bl_description = "Create the film strip from the loaded footage"
+
+    action: EnumProperty(
+        items=[('ADD', "Add New Reel", "Build an additional reel and keep the existing ones"),
+               ('REPLACE', "Replace Reel", "Build a new reel and delete the existing one it replaces")],
+        default='ADD', options={'HIDDEN', 'SKIP_SAVE'})
+
+    @classmethod
+    def description(cls, context, properties):
+        if properties.action == 'REPLACE':
+            return ("Build the reel and replace an existing film reel made with this add-on: the reel "
+                    "that holds the active object, otherwise the most recently built one")
+        return "Build the reel as an additional film reel, keeping all existing ones"
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.film_reel.src_frames > 0
+
+    def execute(self, context):
+        fr = context.scene.film_reel
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        if fr.source_type == 'SEQUENCE':
+            names = [f.name for f in fr.files]
+            needed = sorted(set(source_index_map(fr)))
+            missing = [names[i] for i in needed
+                       if not os.path.isfile(os.path.join(fr.directory, names[i]))]
+            if missing:
+                self.report({'ERROR'}, "Missing frame file: %s" % missing[0])
+                return {'CANCELLED'}
+        elif not os.path.isfile(fr.directory):
+            self.report({'ERROR'}, "Video file not found: %s" % fr.directory)
+            return {'CANCELLED'}
+        if fr.use_custom_ends and fr.layout_mode == 'SPIRAL':
+            a, b = resolve_end_positions(fr)
+            if (b - a).length < 1e-6:
+                self.report({'ERROR'}, "Reel End A and End B are at the same position")
+                return {'CANCELLED'}
+        target = target_reel(context) if self.action == 'REPLACE' else None
+        old_name = target.name if target is not None else ""
+        try:
+            n = build_reel(context, fr, target)
+        except Exception as e:
+            self.report({'ERROR'}, "Build failed: %s" % e)
+            raise
+        first, last = effective_range(fr)
+        what = "Replaced '%s' with" % old_name if target is not None else "Built"
+        self.report({'INFO'}, "%s a film reel of %d frames (%d-%d)" % (what, n, first, last))
+        return {'FINISHED'}
+
+
+# ----------------------------------------------------------------------------
+# Color space editing (the "Color Space" dropdown on each frame's Image Texture node)
+# ----------------------------------------------------------------------------
+def reel_images(col):
+    """Every distinct image used by the frame materials of a reel."""
+    images, seen = [], set()
+    for ob in col.all_objects:
+        if ob.type != 'MESH':
+            continue
+        for slot in ob.material_slots:
+            mat = slot.material
+            if mat is None or mat.node_tree is None:
+                continue
+            for node in mat.node_tree.nodes:
+                if node.type == 'TEX_IMAGE' and node.image is not None \
+                        and node.image.name not in seen:
+                    seen.add(node.image.name)
+                    images.append(node.image)
+    return images
+
+
+def reel_colorspace(col):
+    """Color space shared by all frames of a reel, 'Mixed' if they differ, '' if none."""
+    names = {img.colorspace_settings.name for img in reel_images(col)}
+    if not names:
+        return ""
+    return names.pop() if len(names) == 1 else "Mixed"
+
+
+_CS_ITEMS = []
+
+
+def _colorspace_items(self, context):
+    global _CS_ITEMS
+    items = []
+    try:
+        reel = target_reel(context)
+        imgs = reel_images(reel) if reel is not None else []
+        if imgs:
+            enum = imgs[0].colorspace_settings.bl_rna.properties["name"].enum_items
+            items = [(e.identifier, e.name, e.description) for e in enum]
+    except Exception:
+        items = []
+    if not items:
+        items = [("sRGB", "sRGB", "")]
+    _CS_ITEMS = items          # keep strings alive for Blender
+    return _CS_ITEMS
+
+
+class FILMREEL_OT_colorspace(Operator):
+    bl_idname = "film_reel.set_colorspace"
+    bl_label = "Set Frame Color Space"
+    bl_options = {'REGISTER', 'UNDO'}
+    bl_description = ("Change the Color Space of every frame image of the reel (the one holding "
+                      "the active object, otherwise the newest) in one go")
+
+    colorspace: EnumProperty(name="Color Space", items=_colorspace_items,
+                             description="Color space applied to all frame images")
+
+    @classmethod
+    def poll(cls, context):
+        return target_reel(context) is not None
+
+    def invoke(self, context, event):
+        current = reel_colorspace(target_reel(context))
+        if current and current != "Mixed":
+            try:
+                self.colorspace = current
+            except Exception:
+                pass
+        return context.window_manager.invoke_props_dialog(self, width=300)
+
+    def draw(self, context):
+        self.layout.prop(self, "colorspace")
+
+    def execute(self, context):
+        reel = target_reel(context)
+        if reel is None:
+            self.report({'ERROR'}, "No reel in this scene")
+            return {'CANCELLED'}
+        imgs = reel_images(reel)
+        changed = 0
+        for img in imgs:
+            try:
+                img.colorspace_settings.name = self.colorspace
+                changed += 1
+            except Exception as e:
+                self.report({'WARNING'}, "%s: %s" % (img.name, e))
+        for area in context.screen.areas:
+            area.tag_redraw()
+        self.report({'INFO'}, "Set color space '%s' on %d image(s) in '%s'" %
+                    (self.colorspace, changed, reel.name))
+        return {'FINISHED'}
+
+
+# ----------------------------------------------------------------------------
+# Flip the picture on every frame (done in each frame's Mapping node, so it is
+# instant, works for video too, and never touches the image pixels)
+# ----------------------------------------------------------------------------
+def _frame_tex_node(mat):
+    if mat is None or mat.node_tree is None:
+        return None
+    return next((n for n in mat.node_tree.nodes if n.type == 'TEX_IMAGE'), None)
+
+
+def _frame_mapping_node(mat, create=False):
+    """The Mapping node feeding the picture texture (made on demand)."""
+    tex = _frame_tex_node(mat)
+    if tex is None:
+        return None
+    links = tex.inputs['Vector'].links
+    if links and links[0].from_node.type == 'MAPPING':
+        return links[0].from_node
+    if not create:
+        return None
+    nt = mat.node_tree
+    uv = nt.nodes.new('ShaderNodeUVMap')
+    uv.location = (tex.location.x - 520, tex.location.y - 20)
+    mp = nt.nodes.new('ShaderNodeMapping')
+    mp.location = (tex.location.x - 260, tex.location.y - 20)
+    mp.vector_type = 'POINT'
+    nt.links.new(uv.outputs['UV'], mp.inputs['Vector'])
+    nt.links.new(mp.outputs['Vector'], tex.inputs['Vector'])
+    return mp
+
+
+def flip_material(mat, axis):
+    """Mirror the picture of one frame material about the centre of the frame window.
+    axis 'H' = left/right, 'V' = up/down. Applying it twice restores the original."""
+    mp = _frame_mapping_node(mat, create=True)
+    if mp is None:
+        return False
+    i = 0 if axis == 'H' else 1
+    loc = list(mp.inputs['Location'].default_value)
+    sc = list(mp.inputs['Scale'].default_value)
+    loc[i] += sc[i]            # texture = (1 - uv) * s + o  ==  -s * uv + (s + o)
+    sc[i] = -sc[i]
+    mp.inputs['Location'].default_value = loc
+    mp.inputs['Scale'].default_value = sc
+    return True
+
+
+def reel_frame_materials(col):
+    mats, seen = [], set()
+    strip = reel_strip(col)
+    if strip is None:
+        return mats
+    for slot in strip.material_slots:
+        m = slot.material
+        if m is not None and m.name not in seen and _frame_tex_node(m) is not None:
+            seen.add(m.name)
+            mats.append(m)
+    return mats
+
+
+def reel_flip_state(col):
+    """(flipped horizontally, flipped vertically) as seen on the reel's first frame."""
+    for m in reel_frame_materials(col):
+        mp = _frame_mapping_node(m)
+        if mp is None:
+            return False, False
+        sc = mp.inputs['Scale'].default_value
+        return sc[0] < 0.0, sc[1] < 0.0
+    return False, False
+
+
+class FILMREEL_OT_flip(Operator):
+    bl_idname = "film_reel.flip_images"
+    bl_label = "Flip Images"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    axis: EnumProperty(items=[('H', "Horizontal", "Mirror left / right"),
+                              ('V', "Vertical", "Mirror up / down")],
+                       default='H', options={'HIDDEN', 'SKIP_SAVE'})
+
+    @classmethod
+    def description(cls, context, properties):
+        return ("Flip the picture on every frame of the reel %s (click again to flip back)" %
+                ("horizontally" if properties.axis == 'H' else "vertically"))
+
+    @classmethod
+    def poll(cls, context):
+        return target_reel(context) is not None
+
+    def execute(self, context):
+        reel = target_reel(context)
+        mats = reel_frame_materials(reel)
+        if not mats:
+            self.report({'WARNING'}, "No frame materials found in '%s'" % reel.name)
+            return {'CANCELLED'}
+        done = sum(1 for m in mats if flip_material(m, self.axis))
+        for area in context.screen.areas:
+            area.tag_redraw()
+        self.report({'INFO'}, "Flipped %d frame(s) %s" %
+                    (done, "horizontally" if self.axis == 'H' else "vertically"))
+        return {'FINISHED'}
+
+
+# ----------------------------------------------------------------------------
+# Unwind operators
+# ----------------------------------------------------------------------------
+def target_strip(context):
+    return reel_strip(target_reel(context))
+
+
+def _unwind_poll(context):
+    ob = target_strip(context)
+    return ob is not None and ob.film_reel_unwind.built_spiral
+
+
+class FILMREEL_OT_unwind_setup(Operator):
+    bl_idname = "film_reel.unwind_setup"
+    bl_label = "Set Up Unwind"
+    bl_options = {'REGISTER', 'UNDO'}
+    bl_description = ("Let the wound reel unwind along a path and re-wind on a second reel. Creates "
+                      "a take-up reel marker and a path curve you can move and reshape")
+
+    @classmethod
+    def poll(cls, context):
+        return _unwind_poll(context)
+
+    def execute(self, context):
+        ob = target_strip(context)
+        uw = ob.film_reel_unwind
+        create_unwind_helpers(context, ob)
+        uw.enabled = True
+        context.view_layer.update()
+        _SIG.pop(ob.name, None)
+        update_unwind_reel(ob)
+        self.report({'INFO'}, "Unwind ready: drag the Unwind slider, or use Animate Over Timeline")
+        return {'FINISHED'}
+
+
+class FILMREEL_OT_unwind_refresh(Operator):
+    bl_idname = "film_reel.unwind_refresh"
+    bl_label = "Refresh"
+    bl_options = {'REGISTER', 'UNDO'}
+    bl_description = ("Re-bend the film after you moved or reshaped the path, the take-up reel "
+                      "or the reel itself (it also updates whenever the frame changes)")
+
+    @classmethod
+    def poll(cls, context):
+        ob = target_strip(context)
+        return ob is not None and ob.film_reel_unwind.enabled
+
+    def execute(self, context):
+        ob = target_strip(context)
+        adopt_helpers(ob)
+        context.view_layer.update()
+        _SIG.pop(ob.name, None)
+        update_unwind_reel(ob)
+        return {'FINISHED'}
+
+
+class FILMREEL_OT_unwind_step(Operator):
+    bl_idname = "film_reel.unwind_step"
+    bl_label = "Step Unwind"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    direction: IntProperty(default=1, options={'HIDDEN', 'SKIP_SAVE'})
+
+    @classmethod
+    def description(cls, context, properties):
+        if properties.direction < 0:
+            return "Back the film up along the path by one step (set the step size below)"
+        return "Advance the film along the path by one step (set the step size below)"
+
+    @classmethod
+    def poll(cls, context):
+        ob = target_strip(context)
+        return ob is not None and ob.film_reel_unwind.enabled
+
+    def execute(self, context):
+        ob = target_strip(context)
+        uw = ob.film_reel_unwind
+        if uw.total_length <= 0.0:
+            context.view_layer.update()
+            _SIG.pop(ob.name, None)
+            update_unwind_reel(ob)
+        if uw.total_length <= 0.0:
+            self.report({'WARNING'}, "Pick a path curve and a take-up object first")
+            return {'CANCELLED'}
+        ys = [v[1] for v in _decoded()[0]]
+        pitch = (max(ys) - min(ys)) * uw.film_scale
+        uw.progress = min(1.0, max(0.0, uw.progress + (1 if self.direction >= 0 else -1)
+                                   * uw.step_frames * pitch / uw.total_length))
+        return {'FINISHED'}
+
+
+class FILMREEL_OT_unwind_keyframe(Operator):
+    bl_idname = "film_reel.unwind_keyframe"
+    bl_label = "Set Unwind Keyframe"
+    bl_options = {'REGISTER', 'UNDO'}
+    bl_description = ("Insert a keyframe for the Unwind value at the current frame of the timeline "
+                      "(move the timeline first to choose where)")
+
+    @classmethod
+    def poll(cls, context):
+        ob = target_strip(context)
+        return ob is not None and ob.film_reel_unwind.enabled
+
+    def execute(self, context):
+        ob = target_strip(context)
+        frame = context.scene.frame_current
+        ob.keyframe_insert(data_path="film_reel_unwind.progress", frame=frame)
+        self.report({'INFO'}, "Keyed Unwind = %.3f at frame %d" % (ob.film_reel_unwind.progress, frame))
+        return {'FINISHED'}
+
+
+class FILMREEL_OT_unwind_disable(Operator):
+    bl_idname = "film_reel.unwind_disable"
+    bl_label = "Back to Wound Reel"
+    bl_options = {'REGISTER', 'UNDO'}
+    bl_description = ("Stop unwinding and restore the plain wound reel. The path and take-up "
+                      "objects are kept")
+
+    @classmethod
+    def poll(cls, context):
+        ob = target_strip(context)
+        return ob is not None and ob.film_reel_unwind.enabled
+
+    def execute(self, context):
+        ob = target_strip(context)
+        ob.film_reel_unwind.enabled = False
+        restore_wound_reel(ob)
+        return {'FINISHED'}
+
+
+class FILMREEL_OT_path_subdivide(Operator):
+    bl_idname = "film_reel.path_subdivide"
+    bl_label = "Subdivide Path"
+    bl_options = {'REGISTER', 'UNDO'}
+    bl_description = ("Re-divide the film path into the chosen number of segments, evenly by length, "
+                      "keeping its shape. Each segment end becomes a control point you can move")
+
+    @classmethod
+    def poll(cls, context):
+        ob = target_strip(context)
+        return ob is not None and ob.film_reel_unwind.path is not None
+
+    def execute(self, context):
+        ob = target_strip(context)
+        uw = ob.film_reel_unwind
+        pob = uw.path
+        pts = _curve_local_points(pob)
+        if len(pts) < 2:
+            self.report({'ERROR'}, "The path curve has no points")
+            return {'CANCELLED'}
+        n = int(uw.path_segments)
+        new = resample_polyline(pts, n)
+        set_path_points(pob, new, smooth=n > 1)
+        context.view_layer.update()
+        _SIG.pop(ob.name, None)
+        update_unwind_reel(ob)
+        self.report({'INFO'}, "Path divided into %d segment%s (%d points)" % (n, "" if n == 1 else "s", n + 1))
+        return {'FINISHED'}
+
+
+class FILMREEL_OT_set_ends(Operator):
+    bl_idname = "film_reel.set_end_positions"
+    bl_label = "Set Reel End Positions"
+    bl_options = {'REGISTER', 'UNDO'}
+    bl_description = ("Turn on custom reel end positions. With exactly 2 objects selected, their "
+                      "origins become the ends (the active object is End A, the supply reel; the other "
+                      "is End B, the take-up reel). Otherwise the typed coordinates are used")
+
+    def execute(self, context):
+        fr = context.scene.film_reel
+        sel = list(context.selected_objects)
+        if len(sel) == 2:
+            act = context.view_layer.objects.active
+            a = act if act in sel else sel[0]
+            b = sel[1] if sel[0] == a else sel[0]
+            fr.end_a = a.matrix_world.translation[:]      # (clears the picked objects...)
+            fr.end_b = b.matrix_world.translation[:]
+            fr.end_obj_a, fr.end_obj_b = a, b             # ...so set them afterwards
+            msg = "End A = '%s', End B = '%s'" % (a.name, b.name)
+        elif not sel:
+            msg = "Using the typed coordinates"
+        else:
+            self.report({'ERROR'}, "Select exactly 2 objects (or none, to use the typed coordinates)")
+            return {'CANCELLED'}
+        fr.use_custom_ends = True
+        self.report({'INFO'}, "Reel ends set: " + msg + ". They are applied when you click Build")
+        return {'FINISHED'}
+
+
+class FILMREEL_OT_swap_ends(Operator):
+    bl_idname = "film_reel.swap_end_positions"
+    bl_label = "Swap"
+    bl_options = {'REGISTER', 'UNDO'}
+    bl_description = "Swap End A (supply reel) and End B (take-up reel)"
+
+    def execute(self, context):
+        fr = context.scene.film_reel
+        oa, ob_ = fr.end_obj_a, fr.end_obj_b
+        a, b = tuple(fr.end_a), tuple(fr.end_b)
+        fr.end_a, fr.end_b = b, a
+        fr.end_obj_a, fr.end_obj_b = ob_, oa
+        return {'FINISHED'}
+
+
+def draw_unwind_ui(layout, context):
+    box = layout.box()
+    box.label(text="Unwind Along Path", icon='CURVE_PATH')
+    ob = target_strip(context)
+    if ob is None:
+        box.label(text="Build a reel first", icon='INFO')
+        return
+    uw = ob.film_reel_unwind
+    if not uw.built_spiral:
+        box.label(text="Rebuild this reel as a Wound Reel", icon='INFO')
+        return
+    if not uw.enabled:
+        box.prop(uw, "path_segments")
+        box.operator("film_reel.unwind_setup", icon='ADD')
+        box.label(text="Reel: %s" % ob.name, icon='INFO')
+        return
+    row = box.row(align=False)
+    sub = row.row(align=True)
+    sub.operator("film_reel.unwind_step", text="", icon='TRIA_LEFT').direction = -1
+    sub.prop(uw, "progress", text="Unwind", slider=True)
+    sub.operator("film_reel.unwind_step", text="", icon='TRIA_RIGHT').direction = 1
+    row.operator("film_reel.unwind_keyframe", text="", icon='KEY_HLT')
+    col = box.column(align=True)
+    col.use_property_split = True
+    col.prop(uw, "step_frames")
+    box.separator(factor=0.5)
+    col = box.column(align=True)
+    col.use_property_split = True
+    col.prop(uw, "path")
+    col.prop(uw, "takeup")
+    col.prop(uw, "takeup_core_mm")
+    col.prop(uw, "takeup_reverse")
+    row = box.row(align=True)
+    row.prop(uw, "path_segments", text="Path Subdivisions")
+    row.operator("film_reel.path_subdivide", text="Subdivide", icon='MOD_SUBSURF')
+    if uw.path is None or uw.takeup is None:
+        box.label(text="Pick a path curve and a take-up object", icon='ERROR')
+    elif uw.status:
+        box.label(text=uw.status, icon='ERROR')
+    row = box.row(align=True)
+    row.operator("film_reel.unwind_refresh", icon='FILE_REFRESH')
+    row.operator("film_reel.unwind_disable", icon='X')
+    box.label(text="Reel: %s" % ob.name, icon='INFO')
+
+
+# ----------------------------------------------------------------------------
+# UI
+# ----------------------------------------------------------------------------
+class FILMREEL_PT_main(Panel):
+    bl_label = "Film Reel"
+    bl_idname = "FILMREEL_PT_main"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Film Reel"
+
+    def draw_header(self, context):
+        self.layout.label(icon='SEQUENCE')
+
+    def draw(self, context):
+        layout = self.layout
+        fr = context.scene.film_reel
+        layout.operator("film_reel.load_source", icon='FILE_MOVIE')
+        if fr.src_frames <= 0:
+            box = layout.box()
+            box.label(text="Load a video or image sequence to begin", icon='INFO')
+            return
+
+        kind = "Video" if fr.source_type == 'VIDEO' else "Image sequence"
+        box = layout.box()
+        col = box.column(align=True)
+        col.label(text="%s: %dx%d px, %d frames" % (kind, fr.src_width, fr.src_height, fr.src_frames),
+                  icon='FILE_MOVIE')
+        col.label(text="%.2f s at %.3f fps" % (fr.src_frames / max(0.001, fr.source_fps), fr.source_fps))
+        col.prop(fr, "source_fps")
+
+        layout.separator()
+        layout.label(text="Frame Rate (fps)", icon='TIME')
+        grid = layout.grid_flow(row_major=True, columns=3, even_columns=True, even_rows=True, align=True)
+        grid.prop(fr, "fps_preset", expand=True)
+        if fr.fps_preset == 'CUSTOM':
+            layout.prop(fr, "custom_fps")
+
+        layout.separator()
+        layout.label(text="Film Size", icon='SEQUENCE')
+        grid = layout.grid_flow(row_major=True, columns=3, even_columns=True, even_rows=True, align=True)
+        grid.prop(fr, "film_size", expand=True)
+        wmm = FILM_WIDTH[fr.film_size]
+        layout.label(text="%s: %g mm wide = %.4g m in Blender" % (FILM_LABEL[fr.film_size], wmm,
+                                                                  film_width_m(fr)), icon='INFO')
+        if fr.film_size != '35MM':
+            layout.label(text="(35mm 4-perf model, scaled to width)")
+
+        layout.separator()
+        layout.label(text="Picture Format", icon='IMAGE_DATA')
+        layout.prop(fr, "aspect_preset", text="Aspect Ratio")
+        if fr.aspect_preset == 'CUSTOM':
+            layout.prop(fr, "custom_aspect", text="Width / Height")
+        asp, src_asp = picture_aspect(fr), source_aspect(fr)
+        if fr.aspect_preset == 'RECOMMENDED':
+            layout.label(text="Matches source: %s" % aspect_text(asp), icon='CHECKMARK')
+        else:
+            layout.label(text="Picture %s - source is %s" % (aspect_text(asp), aspect_text(src_asp)),
+                         icon='INFO')
+            layout.prop(fr, "image_fit", text="Fit")
+        col = layout.column()
+        col.enabled = fr.source_type != 'VIDEO'
+        col.prop(fr, "max_image_size", text="Resolution")
+        tw, th = target_dims(fr)
+        if fr.source_type == 'VIDEO':
+            layout.label(text="Video decodes at native %dx%d px" % (tw, th), icon='INFO')
+        else:
+            rec = recommended_resolution(fr)
+            if fr.max_image_size == 'RECOMMENDED':
+                layout.label(text="Recommended: %s" % ("Original" if rec == 0 else "%d px" % rec),
+                             icon='CHECKMARK')
+            layout.label(text="Frame textures: %dx%d px (source %dx%d)" %
+                         (tw, th, fr.src_width, fr.src_height))
+        rw, rh = render_size_for(fr)
+        layout.operator("film_reel.set_render_size",
+                        text="Set Render Size (%dx%d)" % (rw, rh), icon='OUTPUT')
+
+        layout.separator()
+        layout.label(text="Frame Range", icon='SEQ_STRIP_META')
+        row = layout.row(align=True)
+        row.prop(fr, "frame_start", text="From")
+        row.prop(fr, "frame_end", text="To")
+        y = yielded_frames(fr)
+        first, last = effective_range(fr)
+        if (fr.frame_start, fr.frame_end) != (first, last):
+            layout.label(text="Clip has only %d frames: using %d-%d" % (y, first, last), icon='ERROR')
+        row = layout.row(align=True)
+        row.operator("film_reel.recommended")
+        row.operator("film_reel.all_frames")
+        layout.label(text="%s yields %d frames (recommended: %d)" %
+                     ("Video" if fr.source_type == 'VIDEO' else "Sequence", y, recommended_frames(fr)))
+        gb = memory_gb(fr)
+        layout.label(text="~%.2f GB image memory" % gb, icon='CHECKMARK' if gb < 2.0 else 'ERROR')
+        n = effective_frames(fr)
+        pitch = pitch_mm_for(fr.film_size)
+        total = n * pitch
+        layout.label(text="Reel: %d frames, %.0f mm (%.1f ft)" % (n, total, total / 304.8))
+
+        layout.separator()
+        box = layout.box()
+        box.prop(fr, "use_custom_ends", icon='PIVOT_CURSOR')
+        if fr.use_custom_ends:
+            if fr.layout_mode != 'SPIRAL':
+                box.label(text="Applies to the Wound Reel layout", icon='INFO')
+            col = box.column(align=True)
+            col.prop(fr, "end_a", text="A")
+            col.prop(fr, "end_b", text="B")
+            row = box.row(align=True)
+            row.prop(fr, "end_obj_a", text="")
+            row.prop(fr, "end_obj_b", text="")
+            if fr.end_obj_a or fr.end_obj_b:
+                box.label(text="Picked objects are read when you click Build", icon='INFO')
+            row = box.row(align=True)
+            row.operator("film_reel.set_end_positions", icon='EYEDROPPER')
+            row.operator("film_reel.swap_end_positions", icon='ARROW_LEFTRIGHT')
+
+        target = target_reel(context)
+        row = layout.row(align=True)
+        row.scale_y = 1.4
+        sub = row.row(align=True)
+        sub.enabled = target is not None
+        sub.operator("film_reel.build", text="Replace Reel", icon='FILE_REFRESH').action = 'REPLACE'
+        row.operator("film_reel.build", text="Add New Reel", icon='ADD').action = 'ADD'
+        if target is not None:
+            layout.label(text="Replace acts on: %s" % target.name, icon='INFO')
+        else:
+            layout.label(text="No reel in this scene yet", icon='INFO')
+        layout.operator("film_reel.build", icon='SEQUENCE')
+
+        if target is not None:
+            layout.separator()
+            layout.label(text="Frame Color Space", icon='COLOR')
+            cs = reel_colorspace(target)
+            if cs:
+                layout.label(text="Current: %s" % cs)
+            layout.operator("film_reel.set_colorspace", text="Change Color Space...",
+                            icon='IMAGE_DATA')
+
+            layout.separator()
+            layout.label(text="Flip Images", icon='MOD_MIRROR')
+            fh, fv = reel_flip_state(target)
+            row = layout.row(align=True)
+            row.operator("film_reel.flip_images", text="Horizontal", icon='ARROW_LEFTRIGHT',
+                         depress=fh).axis = 'H'
+            row.operator("film_reel.flip_images", text="Vertical", icon='EMPTY_SINGLE_ARROW',
+                         depress=fv).axis = 'V'
+
+
+class FILMREEL_PT_options(Panel):
+    bl_label = "Reel Options"
+    bl_idname = "FILMREEL_PT_options"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Film Reel"
+    bl_parent_id = "FILMREEL_PT_main"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        fr = context.scene.film_reel
+        layout.prop(fr, "layout_mode")
+        if fr.layout_mode == 'STRAIGHT':
+            layout.prop(fr, "stand_upright")
+        else:
+            layout.prop(fr, "core_radius_mm")
+            layout.prop(fr, "wind_spacing_mm")
+            layout.separator()
+            draw_unwind_ui(layout, context)
+        layout.separator()
+        sub = layout.column()
+        sub.enabled = fr.source_type != 'VIDEO'
+        sub.prop(fr, "pack_images")
+        layout.separator()
+        layout.prop(fr, "scale_multiplier")
+        upm = units_per_mm(context.scene, fr)
+        layout.label(text="1 mm of film = %.6g Blender units" % upm, icon='INFO')
+        if fr.scale_multiplier == 1.0:
+            layout.label(text="True scale (follows Scene Unit Scale)", icon='CHECKMARK')
+
+
+classes = (FilmReelFile, FilmReelSettings, FilmReelUnwind, FILMREEL_OT_load, FILMREEL_OT_recommended,
+           FILMREEL_OT_all, FILMREEL_OT_render_size, FILMREEL_OT_build, FILMREEL_OT_colorspace, FILMREEL_OT_flip,
+           FILMREEL_OT_unwind_setup, FILMREEL_OT_unwind_refresh, FILMREEL_OT_unwind_step,
+           FILMREEL_OT_unwind_keyframe, FILMREEL_OT_path_subdivide,
+           FILMREEL_OT_set_ends, FILMREEL_OT_swap_ends,
+           FILMREEL_OT_unwind_disable, FILMREEL_PT_main, FILMREEL_PT_options)
+
+
+def register():
+    for c in classes:
+        bpy.utils.register_class(c)
+    bpy.types.Scene.film_reel = PointerProperty(type=FilmReelSettings)
+    bpy.types.Object.film_reel_unwind = PointerProperty(type=FilmReelUnwind)
+    if _unwind_frame_handler not in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.append(_unwind_frame_handler)
+    if _unwind_depsgraph_handler not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_unwind_depsgraph_handler)
+
+
+def unregister():
+    if _unwind_depsgraph_handler in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_unwind_depsgraph_handler)
+    if _unwind_frame_handler in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.remove(_unwind_frame_handler)
+    del bpy.types.Object.film_reel_unwind
+    del bpy.types.Scene.film_reel
+    for c in reversed(classes):
+        bpy.utils.unregister_class(c)
+
+
+if __name__ == "__main__":
+    register()
