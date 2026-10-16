@@ -6,7 +6,7 @@ Film Reel Generator add on for blender
 
 2. Click on arrow at the top right, then click on install from disk. 
 
-3. Find "Filmreel_Generator_AddOn" click on it then click on install from disk.
+3. Find add-on python script click on it then click on install from disk.
 
 
 
